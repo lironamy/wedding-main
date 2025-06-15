@@ -42,7 +42,7 @@ export default function DashboardPage() {
   const [processingPhotosMessage, setProcessingPhotosMessage] = useState<string | null>(null)
   const [isProcessingPhotos, setIsProcessingPhotos] = useState(false)
   const [matchedPhotos, setMatchedPhotos] = useState<Array<{ photoUrl: string; guestName: string; confidence: number }>>([])
-
+  const [notMatchedPhotos, setNotMatchedPhotos] = useState<Array<{ photoUrl: string; detectedFaces: number }>>([])
   const [selectedTab, setSelectedTab] = useState('photos')
 
   useEffect(() => {
@@ -274,6 +274,22 @@ export default function DashboardPage() {
     }
   };
 
+  const fetchNotMatchedPhotos = async () => {
+    try {
+      const notMatchedResponse = await fetch('/api/photos/not-matched-photos');
+      const notMatchedData = await notMatchedResponse.json();
+      console.log('Not Matched Data:', notMatchedData); // Debug log
+      if (notMatchedResponse.ok && notMatchedData.photos) {
+        setNotMatchedPhotos(notMatchedData.photos);
+      } else {
+        setNotMatchedPhotos([]);
+      }
+    } catch (error) {
+      console.error('Error fetching not matched photos:', error);
+      setNotMatchedPhotos([]);
+    }
+  };
+
   const handleProcessWeddingPhotos = async () => {
     setIsProcessingPhotos(true);
     setProcessingPhotosMessage("מתחיל עיבוד תמונות חתונה וזיהוי פנים... זה עשוי לקחת זמן מה.");
@@ -287,6 +303,7 @@ export default function DashboardPage() {
       // Fetch matched photos after processing
       if (response.ok) {
         await fetchMatchedPhotos();
+        await fetchNotMatchedPhotos();
       }
     } catch (error) {
       console.error("Wedding photo processing error:", error);
@@ -299,6 +316,7 @@ export default function DashboardPage() {
   useEffect(() => {
     if (selectedTab === 'processing') {
       fetchMatchedPhotos();
+      fetchNotMatchedPhotos();
     }
   }, [selectedTab]);
 
@@ -503,28 +521,58 @@ export default function DashboardPage() {
                 {matchedPhotos.length > 0 && (
                   <div className="mt-6">
                     <h3 className="text-lg font-semibold mb-4">תמונות שזוהו:</h3>
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
                       {matchedPhotos.map((match, index) => (
                         <Card key={index} className="overflow-hidden">
-                          <div className="relative aspect-square">
+                          <div className="relative aspect-square w-32 h-32 mx-auto">
                             <img
                               src={match.photoUrl}
                               alt={`תמונה ${index + 1}`}
                               className="object-cover w-full h-full"
                             />
                           </div>
-                          <CardContent className="p-4">
-                            <p className="font-medium">{match.guestName}</p>
-                            <p className="text-sm text-gray-500">
+                          <CardContent className="p-2">
+                            <p className="font-medium text-sm">{match.guestName}</p>
+                            <p className="text-xs text-gray-500">
                               רמת התאמה: {Math.round(match.confidence * 100)}%
                             </p>
                           </CardContent>
                         </Card>
                       ))}
-                      
                     </div>
                   </div>
                 )}
+
+                {/* Display the not matched photos */}
+                <div className="mt-6">
+                  <h3 className="text-lg font-semibold mb-4">תמונות שלא זוהו:</h3>
+                  {isLoadingPhotos ? (
+                    <div className="flex justify-center items-center py-8">
+                      <Loader2 className="h-8 w-8 animate-spin text-pink-500" />
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
+                      {notMatchedPhotos.map((photo, index) => (
+                        <Card key={index} className="overflow-hidden">
+                          <div className="relative aspect-square w-32 h-32 mx-auto">
+                            <img
+                              src={photo.photoUrl}
+                              alt={`תמונה ${index + 1}`}
+                              className="object-cover w-full h-full"
+                              loading="lazy"
+                            />
+                          </div>
+                          <CardContent className="p-2">
+                            <p className="font-medium text-sm">לא זוהה</p>
+                            <p className="text-xs text-gray-500">
+                              פנים שזוהו: {photo.detectedFaces}
+                            </p>
+                          </CardContent>      
+                        </Card>
+                      ))}
+                    </div>
+                  )}
+                </div>
               </CardContent>
             </Card>
           </TabsContent>

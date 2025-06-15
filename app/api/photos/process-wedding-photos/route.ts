@@ -7,7 +7,7 @@ import * as faceapi from 'face-api.js';
 import fetch from 'node-fetch'; // To fetch images from Cloudinary
 import { getTokenFromCookie, verifyToken } from '@/app/utils/jwt'; // For auth if needed, or remove if it's a system process
 
-const FACE_MATCH_THRESHOLD = 0.3; // Lowered from 0.4 to be even more lenient
+const FACE_MATCH_THRESHOLD = 0.9; // Lowered from 0.4 to be even more lenient
 const FACE_MATCH_DISTANCE_THRESHOLD = 0.7; // Increased from 0.6 to be more lenient
 
 export async function POST(request: Request) { // Or GET, if triggered by a cron or manually without payload
