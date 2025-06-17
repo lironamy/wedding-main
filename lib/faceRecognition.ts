@@ -27,8 +27,8 @@ export async function loadModels() {
     await faceapi.nets.tinyFaceDetector.loadFromDisk(MODELS_URL); // Add TinyFaceDetector model
     await faceapi.nets.faceLandmark68Net.loadFromDisk(MODELS_URL);
     await faceapi.nets.faceRecognitionNet.loadFromDisk(MODELS_URL);
-    // Optional: await faceapi.nets.ageGenderNet.loadFromDisk(MODELS_URL);
-    // Optional: await faceapi.nets.faceExpressionNet.loadFromDisk(MODELS_URL);
+    // Optional: await faceapi.nets.ageGenderNet.loadFromDisk(MODELS_URL); // Not currently used
+    // Optional: await faceapi.nets.faceExpressionNet.loadFromDisk(MODELS_URL); // Not currently used
 
     modelsLoaded = true;
     console.log('FaceAPI models loaded successfully.');
@@ -40,7 +40,7 @@ export async function loadModels() {
   }
 }
 
-const MAX_DIMENSION = 1280;
+const MAX_DIMENSION = 800;
 
 // Function to convert image buffer to a Canvas Image element for face-api.js
 export async function bufferToImage(inputBuffer: Buffer): Promise<canvas.Image> {
@@ -117,7 +117,7 @@ export async function getFaceDetectorOptions() {
     // Using TinyFaceDetector for faster processing, potentially lower accuracy
     // Common inputSizes: 128, 160, 224, 320, 416, 512, 608. Larger is more accurate but slower.
     // scoreThreshold: minimum confidence score to consider a detection a face.
-    return new faceapi.TinyFaceDetectorOptions({ inputSize: 512, scoreThreshold: 0.5 });
+    return new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 });
 }
 
 // Initialize models on server startup (e.g., in your main server file or a global setup)
