@@ -182,6 +182,9 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
         }
 
         const BATCH_SIZE = 10; // Define the batch size
+        const processingPromises = photosToProcess.map(photo => processPhoto(photo, guestUsersWithEncodings, faceMatcher));
+        const results = await Promise.allSettled(processingPromises);
+
         let photosProcessedCount = 0;
         let facesMatchedCount = 0;
         let totalFacesDetected = 0;
@@ -222,6 +225,27 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
         }
 
         console.log('\nOverall Processing Summary:');
+        results.forEach(result => {
+            if (result.status === 'fulfilled') {
+                const data = result.value;
+                if (data.success) {
+                    photosProcessedCount++;
+                    totalFacesDetected += data.details.photoFacesDetected;
+                    facesMatchedCount += data.details.photoFacesMatched;
+                    matchDetails.push(...data.details.photoMatchDetails);
+                } else {
+                    // Log error for this specific photo if processing function indicated failure (handled error)
+                    console.warn(`[Photo ${data.photoId}] Processing reported failure: ${data.error}`);
+                }
+            } else {
+                // Log error if the promise itself was rejected (unhandled exception in processPhoto or other issue)
+                // Attempt to get photoId if the error object might have it (as returned by processPhoto on error)
+                const photoId = result.reason && typeof result.reason === 'object' && 'photoId' in result.reason ? result.reason.photoId : 'Unknown Photo ID';
+                console.error(`[Photo ${photoId}] Unhandled promise rejection during processing:`, result.reason);
+            }
+        });
+
+        console.log('\nProcessing Summary:');
         console.log(`Total photos processed: ${photosProcessedCount}`);
         console.log(`Total faces detected: ${totalFacesDetected}`);
         console.log(`Total faces matched: ${facesMatchedCount}`);
