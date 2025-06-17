@@ -6,8 +6,9 @@ import { loadModels, bufferToImage, getFaceDetectorOptions } from '@/lib/faceRec
 import * as faceapi from 'face-api.js';
 import fetch from 'node-fetch'; // To fetch images from Cloudinary
 import { getTokenFromCookie, verifyToken } from '@/app/utils/jwt'; // For auth if needed, or remove if it's a system process
+import mongoose from 'mongoose';
 
-const FACE_MATCH_THRESHOLD = 0.9; // Lowered from 0.4 to be even more lenient
+const FACE_MATCH_THRESHOLD = 0.6; // Lowered from 0.4 to be even more lenient
 const FACE_MATCH_DISTANCE_THRESHOLD = 0.7; // Increased from 0.6 to be more lenient
 
 export async function POST(request: Request) { // Or GET, if triggered by a cron or manually without payload
@@ -159,15 +160,16 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
                         // Check if the best match is not "unknown" and meets our distance threshold
                         if (bestMatch && bestMatch.label !== 'unknown' && bestMatch.distance < FACE_MATCH_DISTANCE_THRESHOLD) {
                             matchedUserId = bestMatch.label;
-                            matchConfidence = 1 - bestMatch.distance;
+                            // Calculate confidence as 1 - distance, ensuring it's between 0 and 1
+                            matchConfidence = Math.max(0, Math.min(1, 1 - bestMatch.distance));
                             facesMatchedCount++;
 
                             // Find guest name for logging
                             const matchedGuest = guestUsersWithEncodings.find(g => (g._id as unknown as string).toString() === matchedUserId);
                             console.log(`\nMATCH FOUND:`);
                             console.log(`- Guest: ${matchedGuest?.name}`);
-                            console.log(`- Confidence: ${matchConfidence}`);
-                            console.log(`- Distance: ${bestMatch.distance}`);
+                            console.log(`- Raw distance: ${bestMatch.distance}`);
+                            console.log(`- Calculated confidence: ${matchConfidence}`);
                             
                             matchDetails.push({
                                 photoId: photo._id.toString(),
@@ -176,10 +178,11 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
                                 distance: bestMatch.distance
                             });
 
+                            // Save the face with confidence value and proper ObjectId
                             photo.detectedFaces.push({
                                 faceDescriptorInPhoto: Array.from(detection.descriptor),
-                                matchedUser: matchedUserId,
-                                matchConfidence,
+                                matchedUser: new mongoose.Types.ObjectId(matchedUserId), // Convert to ObjectId
+                                matchConfidence: matchConfidence,
                                 boundingBox: detection.detection.box
                             });
                         } else {

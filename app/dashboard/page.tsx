@@ -264,7 +264,27 @@ export default function DashboardPage() {
       const matchedData = await matchedResponse.json();
       console.log('Matched Data:', matchedData); // Debug log
       if (matchedResponse.ok && matchedData.matches) {
-        setMatchedPhotos(matchedData.matches);
+        // Process and validate confidence values
+        const processedMatches = matchedData.matches.map((match: { photoUrl: string; guestName: string; confidence: number }) => {
+          const confidence = typeof match.confidence === 'number' && !isNaN(match.confidence)
+            ? Math.max(0, Math.min(1, match.confidence))
+            : 0;
+          
+          console.log('Individual match data:', {
+            photoUrl: match.photoUrl,
+            guestName: match.guestName,
+            rawConfidence: match.confidence,
+            processedConfidence: confidence,
+            calculatedPercentage: Math.round(confidence * 100)
+          });
+
+          return {
+            ...match,
+            confidence
+          };
+        });
+
+        setMatchedPhotos(processedMatches);
       } else {
         setMatchedPhotos([]);
       }
@@ -461,9 +481,10 @@ export default function DashboardPage() {
                     {userPhotos.map((photo, index) => (
                       <div key={index} className="relative aspect-square group">
                         <img
-                          src={photo.imageUrl}
+                          src={photo.imageUrl.split('/upload/').join('/upload/w_300,f_auto,q_auto/')}
                           alt={`תמונת חתונה ${index + 1}`}
                           className="w-full h-full object-cover rounded-lg"
+                          loading="lazy"
                         />
                         <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-40 transition-opacity rounded-lg flex items-center justify-center">
                           <Button
@@ -520,21 +541,22 @@ export default function DashboardPage() {
 
                 {matchedPhotos.length > 0 && (
                   <div className="mt-6">
-                    <h3 className="text-lg font-semibold mb-4">תמונות שזוהו:</h3>
+                    <h3 className="text-lg font-semibold mb-4">תמונות שזוהו ({matchedPhotos.length} זיהויים):</h3>
                     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
                       {matchedPhotos.map((match, index) => (
                         <Card key={index} className="overflow-hidden">
                           <div className="relative aspect-square w-32 h-32 mx-auto">
                             <img
-                              src={match.photoUrl}
+                              src={match.photoUrl.split('/upload/').join('/upload/w_300,f_auto,q_auto/')}
                               alt={`תמונה ${index + 1}`}
                               className="object-cover w-full h-full"
+                              loading="lazy"
                             />
                           </div>
                           <CardContent className="p-2">
                             <p className="font-medium text-sm">{match.guestName}</p>
                             <p className="text-xs text-gray-500">
-                              רמת התאמה: {Math.round(match.confidence * 100)}%
+                              רמת התאמה: {Math.round((match.confidence || 0) * 100)}%
                             </p>
                           </CardContent>
                         </Card>
@@ -556,7 +578,7 @@ export default function DashboardPage() {
                         <Card key={index} className="overflow-hidden">
                           <div className="relative aspect-square w-32 h-32 mx-auto">
                             <img
-                              src={photo.photoUrl}
+                              src={photo.photoUrl.split('/upload/').join('/upload/w_300,f_auto,q_auto/')}
                               alt={`תמונה ${index + 1}`}
                               className="object-cover w-full h-full"
                               loading="lazy"
