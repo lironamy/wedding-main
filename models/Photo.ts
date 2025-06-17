@@ -6,8 +6,7 @@ export interface IDetectedFace {
   faceDescriptorInPhoto: number[];
   matchedUser?: IUser['_id']; // Reference to User ID (guest) if a match is found
   matchConfidence?: number; // Confidence score for the face match
-  // Optional: store bounding box if needed for frontend display
-  // box?: { x: number, y: number, width: number, height: number };
+  boundingBox?: { x: number, y: number, width: number, height: number };
 }
 
 export interface IPhoto extends Document {

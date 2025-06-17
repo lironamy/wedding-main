@@ -148,7 +148,7 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
                             console.log(`[Photo ${photo._id}] MATCH FOUND: Guest: ${matchedGuest?.name}, Raw distance: ${bestMatch.distance}, Calculated confidence: ${matchConfidence}`);
                             
                             photoMatchDetails.push({
-                                photoId: photo._id.toString(),
+                                photoId: (photo._id as mongoose.Types.ObjectId).toString(),
                                 guestName: matchedGuest?.name || 'Unknown',
                                 confidence: matchConfidence,
                                 distance: bestMatch.distance
@@ -181,6 +181,7 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
             }
         }
 
+        const BATCH_SIZE = 10; // Define the batch size
         const processingPromises = photosToProcess.map(photo => processPhoto(photo, guestUsersWithEncodings, faceMatcher));
         const results = await Promise.allSettled(processingPromises);
 
@@ -189,6 +190,41 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
         let totalFacesDetected = 0;
         let matchDetails: Array<{ photoId: string; guestName: string; confidence: number; distance: number }> = [];
 
+        const totalPhotos = photosToProcess.length;
+        const numBatches = Math.ceil(totalPhotos / BATCH_SIZE);
+
+        console.log(`Starting processing in ${numBatches} batches of up to ${BATCH_SIZE} photos each.`);
+
+        for (let i = 0; i < numBatches; i++) {
+            const batchStart = i * BATCH_SIZE;
+            const batchEnd = Math.min((i + 1) * BATCH_SIZE, totalPhotos);
+            const currentBatchPhotos = photosToProcess.slice(batchStart, batchEnd);
+
+            console.log(`\n--- Starting Batch ${i + 1}/${numBatches} --- (${currentBatchPhotos.length} photos)`);
+
+            const processingPromises = currentBatchPhotos.map(photo => processPhoto(photo, guestUsersWithEncodings, faceMatcher));
+            const results = await Promise.allSettled(processingPromises);
+
+            results.forEach(result => {
+                if (result.status === 'fulfilled') {
+                    const data = result.value;
+                    if (data.success) {
+                        photosProcessedCount++;
+                        totalFacesDetected += data.details.photoFacesDetected;
+                        facesMatchedCount += data.details.photoFacesMatched;
+                        matchDetails.push(...data.details.photoMatchDetails);
+                    } else {
+                        console.warn(`[Photo ${data.photoId}] Processing reported failure during batch ${i+1}: ${data.error}`);
+                    }
+                } else {
+                    const photoId = result.reason && typeof result.reason === 'object' && 'photoId' in result.reason ? result.reason.photoId : 'Unknown Photo ID in Batch ' + (i+1);
+                    console.error(`[Photo ${photoId}] Unhandled promise rejection during batch ${i+1}:`, result.reason);
+                }
+            });
+            console.log(`--- Completed Batch ${i + 1}/${numBatches} ---`);
+        }
+
+        console.log('\nOverall Processing Summary:');
         results.forEach(result => {
             if (result.status === 'fulfilled') {
                 const data = result.value;
