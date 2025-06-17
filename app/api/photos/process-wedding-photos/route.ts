@@ -31,10 +31,10 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
         }
         // End Optional Auth
 
-        // Get all photos, not just unprocessed ones
-        const photosToProcess = await Photo.find({});
+        // Get only photos that have not been processed yet
+        const photosToProcess = await Photo.find({ isProcessed: false });
         if (photosToProcess.length === 0) {
-            return NextResponse.json({ message: 'No wedding photos found to process.' }, { status: 200 });
+            return NextResponse.json({ message: 'No unprocessed wedding photos found to process.' }, { status: 200 });
         }
 
         console.log(`Found ${photosToProcess.length} photos to process`);
@@ -182,18 +182,22 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
         }
 
         const BATCH_SIZE = 10; // Define the batch size
-        const processingPromises = photosToProcess.map(photo => processPhoto(photo, guestUsersWithEncodings, faceMatcher));
-        const results = await Promise.allSettled(processingPromises);
+        // Removed initial processing of all photos at once
 
         let photosProcessedCount = 0;
         let facesMatchedCount = 0;
         let totalFacesDetected = 0;
-        let matchDetails: Array<{ photoId: string; guestName: string; confidence: number; distance: number }> = [];
+        let allMatchDetails: Array<{ photoId: string; guestName: string; confidence: number; distance: number }> = []; // Renamed from matchDetails
 
         const totalPhotos = photosToProcess.length;
+        // The check for totalPhotos === 0 is already correctly placed before this block if photosToProcess was filtered.
+        // If not, it should be here:
+        // if (totalPhotos === 0) {
+        //     return NextResponse.json({ message: 'No unprocessed wedding photos found to process.' }, { status: 200 });
+        // }
         const numBatches = Math.ceil(totalPhotos / BATCH_SIZE);
 
-        console.log(`Starting processing in ${numBatches} batches of up to ${BATCH_SIZE} photos each.`);
+        console.log(`Found ${totalPhotos} unprocessed photos to process in ${numBatches} batches of up to ${BATCH_SIZE} photos each.`); // Modified log message slightly for clarity
 
         for (let i = 0; i < numBatches; i++) {
             const batchStart = i * BATCH_SIZE;
@@ -202,61 +206,50 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
 
             console.log(`\n--- Starting Batch ${i + 1}/${numBatches} --- (${currentBatchPhotos.length} photos)`);
 
-            const processingPromises = currentBatchPhotos.map(photo => processPhoto(photo, guestUsersWithEncodings, faceMatcher));
-            const results = await Promise.allSettled(processingPromises);
+            // Create promises ONLY for the current batch
+            const batchProcessingPromises = currentBatchPhotos.map(photo =>
+                processPhoto(photo, guestUsersWithEncodings, faceMatcher)
+            );
+            const batchResults = await Promise.allSettled(batchProcessingPromises);
 
-            results.forEach(result => {
+            batchResults.forEach(result => {
                 if (result.status === 'fulfilled') {
                     const data = result.value;
                     if (data.success) {
                         photosProcessedCount++;
                         totalFacesDetected += data.details.photoFacesDetected;
                         facesMatchedCount += data.details.photoFacesMatched;
-                        matchDetails.push(...data.details.photoMatchDetails);
+                        allMatchDetails.push(...data.details.photoMatchDetails); // Use renamed variable
                     } else {
                         console.warn(`[Photo ${data.photoId}] Processing reported failure during batch ${i+1}: ${data.error}`);
                     }
                 } else {
-                    const photoId = result.reason && typeof result.reason === 'object' && 'photoId' in result.reason ? result.reason.photoId : 'Unknown Photo ID in Batch ' + (i+1);
+                    // Try to get photoId from the reason if possible
+                    let photoId = 'Unknown Photo ID';
+                    if (result.reason && typeof result.reason === 'object' && 'photoId' in result.reason) {
+                        photoId = String(result.reason.photoId); // Ensure it's a string
+                    }
                     console.error(`[Photo ${photoId}] Unhandled promise rejection during batch ${i+1}:`, result.reason);
                 }
             });
             console.log(`--- Completed Batch ${i + 1}/${numBatches} ---`);
         }
 
-        console.log('\nOverall Processing Summary:');
-        results.forEach(result => {
-            if (result.status === 'fulfilled') {
-                const data = result.value;
-                if (data.success) {
-                    photosProcessedCount++;
-                    totalFacesDetected += data.details.photoFacesDetected;
-                    facesMatchedCount += data.details.photoFacesMatched;
-                    matchDetails.push(...data.details.photoMatchDetails);
-                } else {
-                    // Log error for this specific photo if processing function indicated failure (handled error)
-                    console.warn(`[Photo ${data.photoId}] Processing reported failure: ${data.error}`);
-                }
-            } else {
-                // Log error if the promise itself was rejected (unhandled exception in processPhoto or other issue)
-                // Attempt to get photoId if the error object might have it (as returned by processPhoto on error)
-                const photoId = result.reason && typeof result.reason === 'object' && 'photoId' in result.reason ? result.reason.photoId : 'Unknown Photo ID';
-                console.error(`[Photo ${photoId}] Unhandled promise rejection during processing:`, result.reason);
-            }
-        });
+        // The redundant results.forEach loop that was outside and after the batch loop has been removed.
+        // The logic for summarizing results is now correctly inside the batch loop and accumulated.
 
-        console.log('\nProcessing Summary:');
-        console.log(`Total photos processed: ${photosProcessedCount}`);
-        console.log(`Total faces detected: ${totalFacesDetected}`);
-        console.log(`Total faces matched: ${facesMatchedCount}`);
-        console.log('\nMatch Details:');
-        matchDetails.forEach(match => {
+        console.log('\nOverall Processing Summary:'); // Kept this title for the section
+        console.log(`Total photos processed successfully: ${photosProcessedCount}`); // Clarified "successfully"
+        console.log(`Total faces detected in processed photos: ${totalFacesDetected}`);
+        console.log(`Total faces matched in processed photos: ${facesMatchedCount}`);
+        console.log('\nMatch Details (from successfully processed photos):');
+        allMatchDetails.forEach(match => { // Use renamed variable
             console.log(`Photo ${match.photoId}: Matched ${match.guestName} with confidence ${Math.round(match.confidence * 100)}% (distance: ${match.distance})`);
         });
 
         return NextResponse.json({
-            message: `Processing complete. ${photosProcessedCount} wedding photos processed. ${facesMatchedCount} faces matched out of ${totalFacesDetected} detected faces.`,
-            details: matchDetails
+            message: `Processing complete. ${photosProcessedCount} wedding photos processed successfully. ${facesMatchedCount} faces matched out of ${totalFacesDetected} detected faces.`,
+            details: allMatchDetails // Use renamed variable
         }, { status: 200 });
 
     } catch (error) {
