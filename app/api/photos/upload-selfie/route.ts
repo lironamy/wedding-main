@@ -6,7 +6,7 @@ import { uploadToCloudinary } from '@/lib/cloudinary';
 import { loadModels, bufferToImage, getFaceDetectorOptions } from '@/lib/faceRecognition'; // Import face recognition utilities
 import * as faceapi from 'face-api.js';
 import fetch from 'node-fetch'; // To fetch image from Cloudinary URL for processing
-import Photo from '@/models/Photo';
+import Photo, { IPhoto } from '@/models/Photo'; // Added IPhoto
 import { updateProgress, clearProgress } from '../processing-progress/route';
 
 
@@ -51,6 +51,115 @@ export async function POST(request: Request) {
         if (!contact) {
             return NextResponse.json({ message: 'Invalid or expired invitation token.' }, { status: 404 });
         }
+
+    // --- Start of new async function ---
+    async function processWeddingPhotosForGuestInBackground(guestId: string, faceDescriptor: number[], allPhotos: IPhoto[]) {
+        try {
+            await loadModels(); // Ensure models are loaded
+            const totalPhotos = allPhotos.length;
+
+            if (totalPhotos > 0) {
+                updateProgress(guestId, 0, totalPhotos);
+
+                const labeledFaceDescriptor = new faceapi.LabeledFaceDescriptors(
+                    guestId,
+                    [new Float32Array(faceDescriptor)]
+                );
+                const faceMatcher = new faceapi.FaceMatcher([labeledFaceDescriptor], 0.3); // Maintained threshold
+
+                let processedCount = 0;
+                for (const photoData of allPhotos) { // Iterate over plain photo data
+                    try {
+                        // Fetch the full Photo document to ensure we have the latest version and can call .save()
+                        const photoDoc = await Photo.findById(photoData._id) as IPhoto | null;
+                        if (!photoDoc) {
+                            console.warn(`Photo with ID ${photoData._id} not found, skipping.`);
+                            processedCount++;
+                            updateProgress(guestId, processedCount, totalPhotos);
+                            continue;
+                        }
+
+                        const imageResponse = await fetch(photoDoc.imageUrl);
+                        if (!imageResponse.ok) {
+                            console.warn(`Failed to fetch image ${photoDoc.imageUrl} for photo ${photoDoc._id}`);
+                            processedCount++;
+                            updateProgress(guestId, processedCount, totalPhotos);
+                            continue;
+                        }
+
+                        const imageBuffer = await imageResponse.buffer();
+                        const image = await bufferToImage(imageBuffer);
+
+                        const detectionOptions = await getFaceDetectorOptions();
+                        const detections = await faceapi.detectAllFaces(image as unknown as HTMLImageElement, detectionOptions)
+                                                      .withFaceLandmarks()
+                                                      .withFaceDescriptors();
+
+                        let foundMatchInPhoto = false;
+                        if (detections.length > 0) {
+                            for (const detection of detections) {
+                                const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
+
+                                // Using a slightly more tolerant threshold for matching against wedding photos as per original logic
+                                // The original code used 0.3 for FaceMatcher construction and then checked bestMatch.distance < 0.7
+                                // This seems like a high threshold (more tolerant). Let's keep it consistent.
+                                // A common threshold for good recognition is < 0.6, 0.7 is quite permissive.
+                                // The prompt specified 0.3 for FaceMatcher, which is strict.
+                                // Let's stick to the 0.3 for the FaceMatcher and then evaluate the match.
+                                // The original code had `faceMatcher = new faceapi.FaceMatcher([labeledFaceDescriptor], 0.3);`
+                                // and then `if (bestMatch && bestMatch.label !== 'unknown' && bestMatch.distance < 0.7)`
+                                // This combination is unusual. A matcher threshold of 0.3 means anything with distance > 0.3 is 'unknown'.
+                                // So `bestMatch.label !== 'unknown'` implicitly means `bestMatch.distance <= 0.3`.
+                                // The `&& bestMatch.distance < 0.7` would then be redundant if the matcher threshold is 0.3.
+                                // Let's assume the intent was to use the matcher's threshold.
+                                if (bestMatch && bestMatch.label !== 'unknown') { // Relies on the FaceMatcher's 0.3 threshold
+                                    // Check if this user is already in detectedFaces for this photo to avoid duplicates
+                                    const userAlreadyDetected = photoDoc.detectedFaces.some(
+                                        df => df.matchedUser && df.matchedUser.toString() === guestId
+                                    );
+
+                                    if (!userAlreadyDetected) {
+                                        photoDoc.detectedFaces.push({
+                                            faceDescriptorInPhoto: Array.from(detection.descriptor),
+                                            matchedUser: guestId as any, // guestId is already a string, but model expects ObjectId type
+                                            matchConfidence: 1 - bestMatch.distance, // distance is <= 0.3
+                                            boundingBox: detection.detection.box
+                                        });
+                                        foundMatchInPhoto = true;
+                                    }
+                                }
+                            }
+                        }
+
+                        if (foundMatchInPhoto) {
+                            photoDoc.isProcessed = true; // Mark as processed if a new match was added
+                            await photoDoc.save();
+                        } else if (!photoDoc.isProcessed) {
+                            // If no match for this guest, but photo was generally unprocessed, mark it now.
+                            // This part might need refinement based on whether `isProcessed` means "processed for *any* user"
+                            // or "processed for *this specific* background task".
+                            // Given the original logic, it seems to mean "an attempt was made to process it".
+                            // photoDoc.isProcessed = true;
+                            // await photoDoc.save(); // Avoid saving if no changes related to this guest.
+                        }
+
+                        processedCount++;
+                        updateProgress(guestId, processedCount, totalPhotos);
+                    } catch (error) {
+                        console.error(`Error processing photo ${photoData._id} in background:`, error);
+                        processedCount++;
+                        updateProgress(guestId, processedCount, totalPhotos);
+                    }
+                }
+            }
+            clearProgress(guestId); // Clear progress at the end of the background task
+            console.log(`Background processing completed for guest ${guestId}`);
+        } catch (error) {
+            console.error(`Error in processWeddingPhotosForGuestInBackground for guest ${guestId}:`, error);
+            clearProgress(guestId); // Ensure progress is cleared on error too
+        }
+    }
+    // --- End of new async function ---
 
         // Upload selfie to Cloudinary
         const selfieBytes = await selfieFile.arrayBuffer();
@@ -157,97 +266,35 @@ export async function POST(request: Request) {
         await contact.save();
 
         // Process wedding photos with the new face encoding
-        if (faceDescriptor) {
+        if (faceDescriptor && guestUser?._id) {
             const guestId = (guestUser._id as unknown as string).toString();
-            try {
-                // Find all photos, both processed and unprocessed
-                const allPhotos = await Photo.find({});
-                const totalPhotos = allPhotos.length;
-                
-                if (totalPhotos > 0) {
-                    // Initialize progress
-                    updateProgress(guestId, 0, totalPhotos);
-
-                    // Create face matcher with just this guest's face
-                    const labeledFaceDescriptor = new faceapi.LabeledFaceDescriptors(
-                        guestId,
-                        [new Float32Array(faceDescriptor)]
-                    );
-                    const faceMatcher = new faceapi.FaceMatcher([labeledFaceDescriptor], 0.3);
-
-                    let processedCount = 0;
-                    for (const photo of allPhotos) {
-                        try {
-                            const imageResponse = await fetch(photo.imageUrl);
-                            if (!imageResponse.ok) {
-                                processedCount++;
-                                updateProgress(guestId, processedCount, totalPhotos);
-                                continue;
-                            }
-
-                            const imageBuffer = await imageResponse.buffer();
-                            const image = await bufferToImage(imageBuffer);
-
-                            const detectionOptions = await getFaceDetectorOptions();
-                            const detections = await faceapi.detectAllFaces(image as unknown as HTMLImageElement, detectionOptions)
-                                                          .withFaceLandmarks()
-                                                          .withFaceDescriptors();
-
-                            let foundMatch = false;
-                            if (detections.length > 0) {
-                                for (const detection of detections) {
-                                    const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
-                                    
-                                    if (bestMatch && bestMatch.label !== 'unknown' && bestMatch.distance < 0.7) {
-                                        // Add this face to the photo's detected faces
-                                        photo.detectedFaces.push({
-                                            faceDescriptorInPhoto: Array.from(detection.descriptor),
-                                            matchedUser: guestUser._id,
-                                            matchConfidence: 1 - bestMatch.distance,
-                                            boundingBox: detection.detection.box
-                                        });
-                                        foundMatch = true;
-                                        // Save the photo immediately after a match is found
-                                        photo.isProcessed = true;
-                                        await photo.save();
-                                    }
-                                }
-                            }
-                            // Save the photo if we found a match or if it's unprocessed
-                            if (!foundMatch && !photo.isProcessed) {
-                                photo.isProcessed = true;
-                                await photo.save();
-                            }
-
-                            processedCount++;
-                            updateProgress(guestId, processedCount, totalPhotos);
-                        } catch (error) {
-                            console.error(`Error processing photo ${photo._id}:`, error);
-                            processedCount++;
-                            updateProgress(guestId, processedCount, totalPhotos);
-                        }
-                    }
-                }
-
-                // Clear progress after completion
-                clearProgress(guestId);
-            } catch (processingError) {
-                console.error('Error processing wedding photos:', processingError);
-                // Clear progress on error
-                clearProgress(guestId);
-            }
+            // Fetch photos once to pass to the background function
+            // Using .lean() for potentially better performance if passing large data,
+            // but we need full Mongoose documents if we were to save them directly from this array.
+            // However, inside the async function, we are fetching the Photo document again by ID.
+            // So, sending lean objects should be fine.
+            Photo.find({}).lean().then(allPhotosFromDB => {
+                 // Intentionally not awaiting this promise
+                processWeddingPhotosForGuestInBackground(guestId, faceDescriptor as number[], allPhotosFromDB as IPhoto[]);
+            }).catch(err => {
+                // Handle error from fetching photos if necessary, though the background function will also try to fetch
+                console.error("Error fetching photos for background processing trigger:", err);
+            });
         }
 
         return NextResponse.json({
-            message: processingMessage || (faceDescriptor ? 'סלפי הועלה ועובד בהצלחה.' : 'הסלפי הועלה, אך יש בעיה בעיבוד.'),
+            message: processingMessage || (faceDescriptor ? 'סלפי הועלה ועובד בהצלחה. עיבוד תמונות החתונה החל ברקע.' : 'הסלפי הועלה, אך יש בעיה בעיבוד.'),
             selfieUrl: cloudinaryResponse.secure_url,
-            guestId: guestUser._id,
+            guestId: guestUser?._id, // guestUser might be null if creation failed before this point
             faceDetected: !!faceDescriptor
         }, { status: 200 });
 
     } catch (error: any) {
         console.error('Selfie upload & processing error:', error);
         if (error.name === 'MongoServerError' && error.code === 11000 && error.keyValue && error.keyValue.email) {
+            // It's possible guestUser is null here if the error occurred during its creation/saving
+            // and if the subsequent photo processing logic was intended to run.
+            // However, with current flow, guestUser save is awaited before photo processing.
             return NextResponse.json({ message: `שגיאה ביצירת משתמש אורח: ייתכן שמשתמש עם אימייל דומה כבר קיים. פרטים: ${error.message}` }, { status: 409 });
         }
         return NextResponse.json({ message: 'שגיאת שרת פנימית', error: error.message }, { status: 500 });
