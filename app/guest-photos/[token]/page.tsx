@@ -28,8 +28,12 @@ export default function GuestPhotosPage() {
   const router = useRouter()
 
   const authenticateGuest = async () => {
-    if (!token) return false;
+    if (!token) {
+      console.log('[GuestPhotos] No token available for authentication');
+      return false;
+    }
     
+    console.log('[GuestPhotos] Attempting guest login with token:', token);
     try {
       const response = await fetch('/api/auth/guest-login', {
         method: 'POST',
@@ -37,15 +41,21 @@ export default function GuestPhotosPage() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({ token }),
+        credentials: 'include', // Important: This ensures cookies are sent/received
       });
       
+      const result = await response.json();
+      console.log('[GuestPhotos] Guest login response:', result);
+      
       if (response.ok) {
+        console.log('[GuestPhotos] Guest login successful');
         setIsAuthenticated(true);
         return true;
       }
+      console.log('[GuestPhotos] Guest login failed:', response.status);
       return false;
     } catch (error) {
-      console.error('Authentication error:', error);
+      console.error('[GuestPhotos] Authentication error:', error);
       return false;
     }
   };
@@ -120,78 +130,69 @@ export default function GuestPhotosPage() {
     setProgressPercent(null)
 
     const formData = new FormData()
-    formData.append("files", file)
-    formData.append("token", token)
+    formData.append('selfie', file)
+    formData.append('token', token)
 
     try {
       const response = await fetch('/api/photos/upload-selfie', {
         method: 'POST',
         body: formData,
+        credentials: 'include'
       })
       const result = await response.json()
+      console.log('[GuestPhotos] Selfie upload response:', result)
 
       if (response.ok && result.faceDetected && result.guestId) {
-        setUploadStatusMessage("סלפי הועלה בהצלחה! מחפש את התמונות שלך...")
+        setUploadStatusMessage("סלפי הועלה בהצלחה! מתחיל לעבד תמונות...")
         setUploadSuccess(true)
-        // Start polling for processing progress and new photos
-        let pollTimeout: NodeJS.Timeout | null = null;
-        let lastPhotoCount = 0;
-        const pollProgressAndPhotos = async () => {
-          // Poll progress
-          const progressResponse = await fetch(`/api/photos/processing-progress?guestId=${result.guestId}`)
-          const progressData = await progressResponse.json()
-          if (progressData.processing) {
-            setProcessingProgress({
-              current: progressData.current,
-              total: progressData.total
-            })
-            const percent = progressData.total > 0 ? Math.round((progressData.current / progressData.total) * 100) : 0;
-            setProgressPercent(percent);
-            setUploadStatusMessage(`מעבד תמונות... ${progressData.current}/${progressData.total} (${percent}%)`)
-          } else {
-            setProcessingProgress(null)
-            setProgressPercent(null)
-            setUploadStatusMessage("העיבוד הושלם! מחפש את התמונות שלך...")
-          }
-          // Poll photos
-          const photosResponse = await fetch('/api/photos/my-photos');
-          const photosData = await photosResponse.json();
-          if (photosResponse.ok && photosData.photos) {
-            setGuestPhotos(photosData.photos.map((photo: any) => photo.imageUrl));
-            if (photosData.photos.length > lastPhotoCount) {
-              lastPhotoCount = photosData.photos.length;
-              setPhotosReady(true);
+
+        // Start processing wedding photos
+        const processResponse = await fetch('/api/photos/process-wedding-photos', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include'
+        })
+
+        if (processResponse.ok) {
+          console.log('[GuestPhotos] Started processing wedding photos')
+          // Start polling for progress
+          let pollTimeout: NodeJS.Timeout | null = null
+          const pollProgress = async () => {
+            const progressResponse = await fetch(`/api/photos/processing-progress?guestId=${result.guestId}`)
+            const progressData = await progressResponse.json()
+            console.log('[GuestPhotos] Processing progress:', progressData)
+
+            if (progressData.processing) {
+              setProcessingProgress({
+                current: progressData.current,
+                total: progressData.total
+              })
+              setProgressPercent(Math.round((progressData.current / progressData.total) * 100))
+              setUploadStatusMessage(`מעבד תמונות... ${progressData.current}/${progressData.total} (${Math.round((progressData.current / progressData.total) * 100)}%)`)
+              pollTimeout = setTimeout(pollProgress, 1500)
+            } else {
+              setUploadStatusMessage("העיבוד הסתיים! טוען את התמונות שלך...")
+              clearTimeout(pollTimeout!)
+              fetchGuestPhotos()
             }
           }
-          // Continue polling if not done
-          if (progressData.processing) {
-            pollTimeout = setTimeout(pollProgressAndPhotos, 1500);
-          }
-        };
-        pollProgressAndPhotos();
-        // Fallback: after 2 minutes, stop polling
-        setTimeout(() => {
-          if (pollTimeout) clearTimeout(pollTimeout);
-          setProcessingProgress(null)
-          setProgressPercent(null)
-          setUploadStatusMessage("העיבוד הושלם! מחפש את התמונות שלך...")
-          fetchGuestPhotos()
-        }, 120000)
-      } else if (response.ok && !result.faceDetected) {
-        setUploadStatusMessage(result.message || "הסלפי הועלה, אך לא הצלחנו לזהות פנים בתמונה. אנא נסו להעלות תמונה ברורה יותר של הפנים שלכם.")
-        setUploadSuccess(false)
-        setProfileImagePreview(null)
+          pollProgress()
+        }
       } else {
         setUploadStatusMessage(result.message || "העלאת הסלפי נכשלה. אנא נסו שוב.")
         setUploadSuccess(false)
       }
     } catch (error) {
-      console.error("Selfie upload error:", error)
-      setUploadStatusMessage("אירעה שגיאה במהלך העלאת הסלפי. אנא בדקו את חיבור האינטרנט ונסו שוב.")
+      console.error("[GuestPhotos] Error:", error)
+      setUploadStatusMessage("אירעה שגיאה. אנא נסו שוב.")
       setUploadSuccess(false)
     } finally {
-      setIsUploading(false)
-      fileInputRef.current.value = ""; // Clear file input
+      if (!uploadSuccess) {
+        setIsUploading(false)
+      }
+      if (fileInputRef.current) {
+        fileInputRef.current.value = ""
+      }
     }
   }
 

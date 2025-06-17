@@ -88,6 +88,7 @@ export default function DashboardPage() {
         }
       })
       const data = await response.json()
+      console.log('[Dashboard] /api/contacts/user-contacts response:', data)
       if (response.ok) {
         setContacts(data.contacts || [])
       } else {
@@ -165,7 +166,7 @@ export default function DashboardPage() {
         body: JSON.stringify([newContact]),
       })
       const result = await response.json()
-      
+      console.log('[Dashboard] /api/contacts/upload-list response:', result)
       if (response.ok) {
         setNewContact({ name: '', phoneNumber: '' })
         setContactUploadMessage("איש הקשר נוסף בהצלחה")

@@ -65,7 +65,7 @@ export async function POST(request: Request) {
                     guestId,
                     [new Float32Array(faceDescriptor)]
                 );
-                const faceMatcher = new faceapi.FaceMatcher([labeledFaceDescriptor], 0.3); // Maintained threshold
+                const faceMatcher = new faceapi.FaceMatcher([labeledFaceDescriptor], 0.6); // More forgiving threshold to match process-wedding-photos
 
                 let processedCount = 0;
                 for (const photoData of allPhotos) { // Iterate over plain photo data
@@ -274,8 +274,8 @@ export async function POST(request: Request) {
             // However, inside the async function, we are fetching the Photo document again by ID.
             // So, sending lean objects should be fine.
             Photo.find({}).lean().then(allPhotosFromDB => {
-                 // Intentionally not awaiting this promise
-                processWeddingPhotosForGuestInBackground(guestId, faceDescriptor as number[], allPhotosFromDB as IPhoto[]);
+                // Intentionally not awaiting this promise
+                processWeddingPhotosForGuestInBackground(guestId, faceDescriptor as number[], allPhotosFromDB as unknown as IPhoto[]);
             }).catch(err => {
                 // Handle error from fetching photos if necessary, though the background function will also try to fetch
                 console.error("Error fetching photos for background processing trigger:", err);

@@ -8,8 +8,8 @@ import fetch from 'node-fetch'; // To fetch images from Cloudinary
 import { getTokenFromCookie, verifyToken } from '@/app/utils/jwt'; // For auth if needed, or remove if it's a system process
 import mongoose from 'mongoose';
 
-const FACE_MATCH_THRESHOLD = 0.6; // Lowered from 0.4 to be even more lenient
-const FACE_MATCH_DISTANCE_THRESHOLD = 0.7; // Increased from 0.6 to be more lenient
+const FACE_MATCH_THRESHOLD = 0.6; // More forgiving threshold
+const FACE_MATCH_DISTANCE_THRESHOLD = 0.7; // More forgiving distance
 
 export async function POST(request: Request) { // Or GET, if triggered by a cron or manually without payload
     try {
@@ -26,8 +26,27 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
             return NextResponse.json({ message: 'Invalid token' }, { status: 401 });
         }
         const mainUser = await User.findById(decodedToken.id);
-        if (!mainUser || mainUser.userType !== 'bride/groom') {
-            return NextResponse.json({ message: 'Unauthorized: Only main users can trigger processing.' }, { status: 403 });
+        if (!mainUser) {
+            return NextResponse.json({ message: 'User not found' }, { status: 401 });
+        }
+
+        // Allow both bride/groom and guests to process photos
+        let guestUsersWithEncodings: IUser[] = [];
+        if (mainUser.userType === 'bride/groom') {
+            // For bride/groom, get all guest users with face encodings
+            guestUsersWithEncodings = await User.find({
+                userType: 'guest',
+                faceEncoding: { $exists: true, $ne: [] },
+                isVerified: true // Only use verified guest selfies
+            }) as IUser[];
+        } else if (mainUser.userType === 'guest') {
+            // For guests, only process their own face encoding
+            if (!mainUser.faceEncoding || !mainUser.isVerified) {
+                return NextResponse.json({ message: 'Guest must have a verified selfie to process photos' }, { status: 400 });
+            }
+            guestUsersWithEncodings = [mainUser];
+        } else {
+            return NextResponse.json({ message: 'Unauthorized: Invalid user type' }, { status: 403 });
         }
         // End Optional Auth
 
@@ -39,20 +58,6 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
 
         console.log(`Found ${photosToProcess.length} photos to process`);
         console.log('Photo IDs:', photosToProcess.map(p => p._id));
-
-        // Fetch all guest users with face encodings
-        const guestUsersWithEncodings = await User.find({
-            userType: 'guest',
-            faceEncoding: { $exists: true, $ne: [] },
-            isVerified: true // Only use verified guest selfies
-        }) as IUser[];
-
-        if (guestUsersWithEncodings.length === 0) {
-            return NextResponse.json({ message: 'No verified guest selfies found. Process selfies first.' }, { status: 400 });
-        }
-
-        console.log(`Found ${guestUsersWithEncodings.length} guests with face encodings:`, 
-            guestUsersWithEncodings.map(g => g.name));
 
         // Create FaceMatcher for guests
         const labeledFaceDescriptors = guestUsersWithEncodings.map((user: IUser) => {
