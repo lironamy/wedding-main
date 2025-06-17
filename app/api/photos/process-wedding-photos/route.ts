@@ -81,28 +81,27 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
             console.log(descriptor);
         }
 
-        let photosProcessedCount = 0;
-        let facesMatchedCount = 0;
-        let totalFacesDetected = 0;
-        let matchDetails: Array<{ photoId: string; guestName: string; confidence: number; distance: number }> = [];
-        let printedFirstFace = false;
+        // Function to process a single photo
+        async function processPhoto(photo: IPhoto, guestUsersWithEncodings: IUser[], faceMatcher: faceapi.FaceMatcher) {
+            let photoFacesDetected = 0;
+            let photoFacesMatched = 0;
+            let photoMatchDetails: Array<{ photoId: string; guestName: string; confidence: number; distance: number }> = [];
 
-        for (const photo of photosToProcess) {
             try {
-                console.log(`\nProcessing photo ${photo._id}`);
+                console.log(`[Photo ${photo._id}] Starting processing for image URL: ${photo.imageUrl}`);
                 const imageResponse = await fetch(photo.imageUrl);
                 if (!imageResponse.ok) {
-                    console.error(`Failed to fetch wedding photo: ${photo.imageUrl}`);
-                    continue;
+                    console.error(`[Photo ${photo._id}] Failed to fetch wedding photo: ${photo.imageUrl}. Status: ${imageResponse.statusText}`);
+                    return { success: false, photoId: photo._id, error: `Failed to fetch image: ${imageResponse.statusText}`, details: { photoFacesDetected, photoFacesMatched, photoMatchDetails } };
                 }
                 const imageBuffer = await imageResponse.buffer();
                 const image = await bufferToImage(imageBuffer);
-                // Log image type and shape
+
                 if (image) {
-                    console.log('Image type:', typeof image);
-                    if (image.width && image.height) {
-                        console.log('Image shape:', image.width, 'x', image.height);
-                    }
+                    console.log(`[Photo ${photo._id}] Image loaded. Type: ${typeof image}, Shape: ${image.width}x${image.height}`);
+                } else {
+                    console.warn(`[Photo ${photo._id}] bufferToImage returned null or undefined.`);
+                     return { success: false, photoId: photo._id, error: `Failed to load image content`, details: { photoFacesDetected, photoFacesMatched, photoMatchDetails } };
                 }
 
                 const detectionOptions = await getFaceDetectorOptions();
@@ -110,105 +109,119 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
                                               .withFaceLandmarks()
                                               .withFaceDescriptors();
 
-                totalFacesDetected += detections.length;
-                console.log(`Found ${detections.length} faces in photo ${photo._id}`);
+                photoFacesDetected = detections.length;
+                console.log(`[Photo ${photo._id}] Found ${detections.length} faces.`);
 
-                // Print full descriptor for the first detected face in the first photo
-                if (!printedFirstFace && detections.length > 0) {
-                    printedFirstFace = true;
-                    console.log('\nFULL DESCRIPTOR for first detected face in first photo:');
-                    console.log(new Float32Array(detections[0].descriptor));
-                }
-
-                // Clear existing detected faces to avoid duplicates
-                photo.detectedFaces = [];
+                photo.detectedFaces = []; // Clear existing detected faces
 
                 if (detections.length > 0) {
                     for (const detection of detections) {
-                        console.log(`\nProcessing face in photo ${photo._id}:`);
-                        console.log(`- Face descriptor length: ${detection.descriptor.length}`);
-                        console.log(`- First 5 values: ${detection.descriptor.slice(0, 5)}`);
+                        console.log(`[Photo ${photo._id}] Processing detected face. Descriptor length: ${detection.descriptor.length}, First 5 values: ${detection.descriptor.slice(0, 5)}`);
 
-                        // Log distance to every guest
                         let minDistance = Infinity;
                         let closestGuestName = '';
                         let closestGuestId = '';
                         guestUsersWithEncodings.forEach(guest => {
                             const guestDescriptor = new Float32Array(guest.faceEncoding!);
-                            // Euclidean distance
                             const dist = faceapi.euclideanDistance(detection.descriptor, guestDescriptor);
-                            console.log(`Distance to guest ${guest.name} (${guest._id}): ${dist}`);
+                            // console.log(`[Photo ${photo._id}] Distance to guest ${guest.name} (${guest._id}): ${dist}`); // Potentially too verbose
                             if (dist < minDistance) {
                                 minDistance = dist;
                                 closestGuestName = guest.name;
                                 closestGuestId = (guest._id as unknown as string).toString();
                             }
                         });
-                        console.log(`Closest guest: ${closestGuestName} (${closestGuestId}), distance: ${minDistance}`);
+                        console.log(`[Photo ${photo._id}] Closest guest: ${closestGuestName} (${closestGuestId}), distance: ${minDistance}`);
 
                         const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
                         let matchedUserId: string | undefined;
                         let matchConfidence = 0;
 
-                        // Log all potential matches for debugging
-                        console.log(`\nFace match details for photo ${photo._id}:`);
-                        console.log(`Best match: ${bestMatch.label} (distance: ${bestMatch.distance})`);
-                        console.log(`All matches:`, bestMatch.toString());
-                        console.log(`Match threshold: ${FACE_MATCH_THRESHOLD}`);
-                        console.log(`Distance threshold: ${FACE_MATCH_DISTANCE_THRESHOLD}`);
+                        console.log(`[Photo ${photo._id}] Face match details: Best match: ${bestMatch.label} (distance: ${bestMatch.distance}). All matches: ${bestMatch.toString()}. Match threshold: ${FACE_MATCH_THRESHOLD}, Distance threshold: ${FACE_MATCH_DISTANCE_THRESHOLD}`);
 
-                        // Check if the best match is not "unknown" and meets our distance threshold
                         if (bestMatch && bestMatch.label !== 'unknown' && bestMatch.distance < FACE_MATCH_DISTANCE_THRESHOLD) {
                             matchedUserId = bestMatch.label;
-                            // Calculate confidence as 1 - distance, ensuring it's between 0 and 1
                             matchConfidence = Math.max(0, Math.min(1, 1 - bestMatch.distance));
-                            facesMatchedCount++;
+                            photoFacesMatched++;
 
-                            // Find guest name for logging
                             const matchedGuest = guestUsersWithEncodings.find(g => (g._id as unknown as string).toString() === matchedUserId);
-                            console.log(`\nMATCH FOUND:`);
-                            console.log(`- Guest: ${matchedGuest?.name}`);
-                            console.log(`- Raw distance: ${bestMatch.distance}`);
-                            console.log(`- Calculated confidence: ${matchConfidence}`);
+                            console.log(`[Photo ${photo._id}] MATCH FOUND: Guest: ${matchedGuest?.name}, Raw distance: ${bestMatch.distance}, Calculated confidence: ${matchConfidence}`);
                             
-                            matchDetails.push({
+                            photoMatchDetails.push({
                                 photoId: photo._id.toString(),
                                 guestName: matchedGuest?.name || 'Unknown',
                                 confidence: matchConfidence,
                                 distance: bestMatch.distance
                             });
 
-                            // Save the face with confidence value and proper ObjectId
                             photo.detectedFaces.push({
                                 faceDescriptorInPhoto: Array.from(detection.descriptor),
-                                matchedUser: new mongoose.Types.ObjectId(matchedUserId), // Convert to ObjectId
+                                matchedUser: new mongoose.Types.ObjectId(matchedUserId),
                                 matchConfidence: matchConfidence,
                                 boundingBox: detection.detection.box
                             });
                         } else {
-                            // If no match found, still store the face but without a match
                             photo.detectedFaces.push({
                                 faceDescriptorInPhoto: Array.from(detection.descriptor),
                                 matchedUser: undefined,
                                 matchConfidence: 0,
                                 boundingBox: detection.detection.box
                             });
-                            console.log(`\nNO MATCH FOUND:`);
-                            console.log(`- Distance: ${bestMatch.distance}`);
-                            console.log(`- Threshold: ${FACE_MATCH_DISTANCE_THRESHOLD}`);
-                            console.log(`- Label: ${bestMatch.label}`);
+                            console.log(`[Photo ${photo._id}] NO MATCH FOUND: Distance: ${bestMatch.distance}, Threshold: ${FACE_MATCH_DISTANCE_THRESHOLD}, Label: ${bestMatch.label}`);
                         }
                     }
                 }
                 photo.isProcessed = true;
                 await photo.save();
-                photosProcessedCount++;
-            } catch (error) {
-                console.error(`Error processing photo ${photo._id} (${photo.imageUrl}):`, error);
+                console.log(`[Photo ${photo._id}] Processing successful. Saved to DB.`);
+                return { success: true, photoId: photo._id, details: { photoFacesDetected, photoFacesMatched, photoMatchDetails } };
+            } catch (error: any) {
+                console.error(`[Photo ${photo._id}] Error during processing (image URL: ${photo.imageUrl}):`, error);
+                return { success: false, photoId: photo._id, error: error.message || 'Unknown error', details: { photoFacesDetected, photoFacesMatched, photoMatchDetails } };
             }
         }
 
-        console.log('\nProcessing Summary:');
+        const BATCH_SIZE = 10; // Define the batch size
+        let photosProcessedCount = 0;
+        let facesMatchedCount = 0;
+        let totalFacesDetected = 0;
+        let matchDetails: Array<{ photoId: string; guestName: string; confidence: number; distance: number }> = [];
+
+        const totalPhotos = photosToProcess.length;
+        const numBatches = Math.ceil(totalPhotos / BATCH_SIZE);
+
+        console.log(`Starting processing in ${numBatches} batches of up to ${BATCH_SIZE} photos each.`);
+
+        for (let i = 0; i < numBatches; i++) {
+            const batchStart = i * BATCH_SIZE;
+            const batchEnd = Math.min((i + 1) * BATCH_SIZE, totalPhotos);
+            const currentBatchPhotos = photosToProcess.slice(batchStart, batchEnd);
+
+            console.log(`\n--- Starting Batch ${i + 1}/${numBatches} --- (${currentBatchPhotos.length} photos)`);
+
+            const processingPromises = currentBatchPhotos.map(photo => processPhoto(photo, guestUsersWithEncodings, faceMatcher));
+            const results = await Promise.allSettled(processingPromises);
+
+            results.forEach(result => {
+                if (result.status === 'fulfilled') {
+                    const data = result.value;
+                    if (data.success) {
+                        photosProcessedCount++;
+                        totalFacesDetected += data.details.photoFacesDetected;
+                        facesMatchedCount += data.details.photoFacesMatched;
+                        matchDetails.push(...data.details.photoMatchDetails);
+                    } else {
+                        console.warn(`[Photo ${data.photoId}] Processing reported failure during batch ${i+1}: ${data.error}`);
+                    }
+                } else {
+                    const photoId = result.reason && typeof result.reason === 'object' && 'photoId' in result.reason ? result.reason.photoId : 'Unknown Photo ID in Batch ' + (i+1);
+                    console.error(`[Photo ${photoId}] Unhandled promise rejection during batch ${i+1}:`, result.reason);
+                }
+            });
+            console.log(`--- Completed Batch ${i + 1}/${numBatches} ---`);
+        }
+
+        console.log('\nOverall Processing Summary:');
         console.log(`Total photos processed: ${photosProcessedCount}`);
         console.log(`Total faces detected: ${totalFacesDetected}`);
         console.log(`Total faces matched: ${facesMatchedCount}`);
