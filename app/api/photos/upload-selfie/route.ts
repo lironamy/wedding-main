@@ -7,7 +7,8 @@ import { loadModels, bufferToImage, getFaceDetectorOptions } from '@/lib/faceRec
 import * as faceapi from 'face-api.js';
 import fetch from 'node-fetch'; // To fetch image from Cloudinary URL for processing
 import Photo, { IPhoto } from '@/models/Photo'; // Added IPhoto
-import { updateProgress, clearProgress } from '../processing-progress/route';
+// import { updateProgress, clearProgress } from '../processing-progress/route'; // Commented out as per requirement
+import { guestSseWriters } from '../guest-photo-stream/route';
 
 
 // Helper to parse FormData (same as in wedding photo upload)
@@ -54,12 +55,14 @@ export async function POST(request: Request) {
 
     // --- Start of new async function ---
     async function processWeddingPhotosForGuestInBackground(guestId: string, faceDescriptor: number[], allPhotos: IPhoto[]) {
+        const sseWriter = guestSseWriters.get(guestId);
         try {
             await loadModels(); // Ensure models are loaded
             const totalPhotos = allPhotos.length;
+            let processedCount = 0;
 
             if (totalPhotos > 0) {
-                updateProgress(guestId, 0, totalPhotos);
+                // updateProgress(guestId, 0, totalPhotos); // Commented out
 
                 const labeledFaceDescriptor = new faceapi.LabeledFaceDescriptors(
                     guestId,
@@ -67,15 +70,19 @@ export async function POST(request: Request) {
                 );
                 const faceMatcher = new faceapi.FaceMatcher([labeledFaceDescriptor], 0.6); // More forgiving threshold to match process-wedding-photos
 
-                let processedCount = 0;
+                // let processedCount = 0; // Moved up
                 for (const photoData of allPhotos) { // Iterate over plain photo data
+                    let isMatch = false; // To send in SSE
                     try {
                         // Fetch the full Photo document to ensure we have the latest version and can call .save()
                         const photoDoc = await Photo.findById(photoData._id) as IPhoto | null;
                         if (!photoDoc) {
                             console.warn(`Photo with ID ${photoData._id} not found, skipping.`);
                             processedCount++;
-                            updateProgress(guestId, processedCount, totalPhotos);
+                            // updateProgress(guestId, processedCount, totalPhotos); // Commented out
+                            if (sseWriter) {
+                                sseWriter.write(`event: photoProcessed\ndata: ${JSON.stringify({ photoUrl: null, isMatch: false, photoId: photoData._id, progress: { current: processedCount, total: totalPhotos }, error: 'Photo not found' })}\n\n`);
+                            }
                             continue;
                         }
 
@@ -83,7 +90,10 @@ export async function POST(request: Request) {
                         if (!imageResponse.ok) {
                             console.warn(`Failed to fetch image ${photoDoc.imageUrl} for photo ${photoDoc._id}`);
                             processedCount++;
-                            updateProgress(guestId, processedCount, totalPhotos);
+                            // updateProgress(guestId, processedCount, totalPhotos); // Commented out
+                            if (sseWriter) {
+                                sseWriter.write(`event: photoProcessed\ndata: ${JSON.stringify({ photoUrl: photoDoc.imageUrl, isMatch: false, photoId: photoDoc._id, progress: { current: processedCount, total: totalPhotos }, error: 'Failed to fetch image' })}\n\n`);
+                            }
                             continue;
                         }
 
@@ -126,6 +136,7 @@ export async function POST(request: Request) {
                                             boundingBox: detection.detection.box
                                         });
                                         foundMatchInPhoto = true;
+                                        isMatch = true; // Set for SSE
                                     }
                                 }
                             }
@@ -134,29 +145,42 @@ export async function POST(request: Request) {
                         if (foundMatchInPhoto) {
                             photoDoc.isProcessed = true; // Mark as processed if a new match was added
                             await photoDoc.save();
-                        } else if (!photoDoc.isProcessed) {
-                            // If no match for this guest, but photo was generally unprocessed, mark it now.
-                            // This part might need refinement based on whether `isProcessed` means "processed for *any* user"
-                            // or "processed for *this specific* background task".
-                            // Given the original logic, it seems to mean "an attempt was made to process it".
-                            // photoDoc.isProcessed = true;
-                            // await photoDoc.save(); // Avoid saving if no changes related to this guest.
                         }
+                        // Not marking as processed if no match for this guest, to allow other processes to evaluate it.
 
                         processedCount++;
-                        updateProgress(guestId, processedCount, totalPhotos);
+                        // updateProgress(guestId, processedCount, totalPhotos); // Commented out
+                        if (sseWriter) {
+                            sseWriter.write(`event: photoProcessed\ndata: ${JSON.stringify({ photoUrl: photoDoc.imageUrl, isMatch, photoId: photoDoc._id, progress: { current: processedCount, total: totalPhotos } })}\n\n`);
+                        }
                     } catch (error) {
                         console.error(`Error processing photo ${photoData._id} in background:`, error);
                         processedCount++;
-                        updateProgress(guestId, processedCount, totalPhotos);
+                        // updateProgress(guestId, processedCount, totalPhotos); // Commented out
+                        if (sseWriter) {
+                            // Send error for this specific photo
+                             sseWriter.write(`event: photoProcessed\ndata: ${JSON.stringify({ photoUrl: photoData.imageUrl || null, isMatch: false, photoId: photoData._id, progress: { current: processedCount, total: totalPhotos }, error: 'Processing error' })}\n\n`);
+                        }
                     }
                 }
             }
-            clearProgress(guestId); // Clear progress at the end of the background task
+            // clearProgress(guestId); // Commented out
             console.log(`Background processing completed for guest ${guestId}`);
+            if (sseWriter) {
+                sseWriter.write(`event: processingComplete\ndata: ${JSON.stringify({ guestId, totalProcessed: processedCount })}\n\n`);
+                // Consider if writer should be closed here or if client handles closure.
+                // For now, let client close after 'processingComplete'.
+                // guestSseWriters.delete(guestId); // This would be done by the SSE route on disconnect
+                // writer.close();
+            }
         } catch (error) {
             console.error(`Error in processWeddingPhotosForGuestInBackground for guest ${guestId}:`, error);
-            clearProgress(guestId); // Ensure progress is cleared on error too
+            // clearProgress(guestId); // Commented out
+            if (sseWriter) {
+                sseWriter.write(`event: processingError\ndata: ${JSON.stringify({ guestId, error: 'General processing error', details: (error as Error).message })}\n\n`);
+                // guestSseWriters.delete(guestId);
+                // writer.close();
+            }
         }
     }
     // --- End of new async function ---

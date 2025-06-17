@@ -21,8 +21,10 @@ export default function GuestPhotosPage() {
   const [selectedPhotos, setSelectedPhotos] = useState<string[]>([])
   const [isLoadingPhotos, setIsLoadingPhotos] = useState(false)
   const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [currentGuestId, setCurrentGuestId] = useState<string | null>(null) // Added for SSE
 
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const eventSourceRef = useRef<EventSource | null>(null) // Added for SSE
   const params = useParams()
   const token = params?.token as string | undefined
   const router = useRouter()
@@ -94,9 +96,18 @@ export default function GuestPhotosPage() {
     if (!token) {
       setUploadStatusMessage("שגיאה: לא זוהה טוקן הזמנה. אנא השתמשו בקישור שקיבלתם בהזמנה.")
     } else {
-      authenticateGuest();
+      authenticateGuest(); // Authenticate initially if token exists
     }
-  }, [token])
+
+    // Cleanup EventSource on component unmount
+    return () => {
+      if (eventSourceRef.current) {
+        console.log('[GuestPhotos] Closing EventSource connection on unmount');
+        eventSourceRef.current.close();
+        eventSourceRef.current = null;
+      }
+    };
+  }, [token]) // Added eventSourceRef to dependency array, though it's a ref. Main trigger is token.
 
   const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -128,6 +139,14 @@ export default function GuestPhotosPage() {
     setUploadSuccess(false)
     setProcessingProgress(null)
     setProgressPercent(null)
+    setGuestPhotos([]) // Clear previous photos
+    setPhotosReady(false) // Reset photos ready state
+
+    // Close any existing EventSource connection
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+      eventSourceRef.current = null;
+    }
 
     const formData = new FormData()
     formData.append('selfie', file)
@@ -143,60 +162,96 @@ export default function GuestPhotosPage() {
       console.log('[GuestPhotos] Selfie upload response:', result)
 
       if (response.ok && result.faceDetected && result.guestId) {
-        setUploadStatusMessage("סלפי הועלה בהצלחה! מתחיל לעבד תמונות...")
-        setUploadSuccess(true)
+        setUploadStatusMessage("סלפי הועלה בהצלחה! מתחבר לעדכוני עיבוד תמונות...")
+        setUploadSuccess(true) // Indicates selfie upload was successful
+        setCurrentGuestId(result.guestId); // Store guestId
 
-        // Start processing wedding photos
-        const processResponse = await fetch('/api/photos/process-wedding-photos', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          credentials: 'include'
-        })
+        // Initialize EventSource
+        const es = new EventSource(`/api/photos/guest-photo-stream?guestId=${result.guestId}`);
+        eventSourceRef.current = es;
 
-        if (processResponse.ok) {
-          console.log('[GuestPhotos] Started processing wedding photos')
-          // Start polling for progress
-          let pollTimeout: NodeJS.Timeout | null = null
-          const pollProgress = async () => {
-            const progressResponse = await fetch(`/api/photos/processing-progress?guestId=${result.guestId}`)
-            const progressData = await progressResponse.json()
-            console.log('[GuestPhotos] Processing progress:', progressData)
+        es.onopen = () => {
+          console.log('[GuestPhotos] SSE Connection Opened');
+          setUploadStatusMessage("מחובר לעדכונים... ממתין לתחילת עיבוד.");
+          // setIsUploading remains true
+        };
 
-            if (progressData.processing) {
-              setProcessingProgress({
-                current: progressData.current,
-                total: progressData.total
-              })
-              setProgressPercent(Math.round((progressData.current / progressData.total) * 100))
-              setUploadStatusMessage(`מעבד תמונות... ${progressData.current}/${progressData.total} (${Math.round((progressData.current / progressData.total) * 100)}%)`)
-              pollTimeout = setTimeout(pollProgress, 1500)
-            } else {
-              setUploadStatusMessage("העיבוד הסתיים! טוען את התמונות שלך...")
-              clearTimeout(pollTimeout!)
-              fetchGuestPhotos()
-            }
+        es.addEventListener('photoProcessed', (event) => {
+          const data = JSON.parse(event.data);
+          console.log('[GuestPhotos] SSE photoProcessed:', data);
+
+          setProcessingProgress({ current: data.progress.current, total: data.progress.total });
+          const percent = Math.round((data.progress.current / data.progress.total) * 100);
+          setProgressPercent(percent);
+          setUploadStatusMessage(`מעבד תמונות... ${data.progress.current}/${data.progress.total} (${percent}%)`);
+
+          if (data.isMatch && data.photoUrl) {
+            setGuestPhotos(prevPhotos => {
+              // Avoid duplicates if backend might send them
+              if (!prevPhotos.includes(data.photoUrl)) {
+                return [...prevPhotos, data.photoUrl];
+              }
+              return prevPhotos;
+            });
           }
-          pollProgress()
-        }
+          if (data.error) {
+            console.warn(`[GuestPhotos] Error processing photo ${data.photoId}: ${data.error}`);
+            // Optionally, display this specific error to the user or add to a list of errors
+          }
+        });
+
+        es.addEventListener('processingComplete', (event) => {
+          const data = JSON.parse(event.data);
+          console.log('[GuestPhotos] SSE processingComplete:', data);
+          setUploadStatusMessage(guestPhotos.length > 0 ? "העיבוד הושלם! מציג את התמונות שלך." : "העיבוד הושלם, אך לא נמצאו תמונות תואמות.");
+          setPhotosReady(true); // Even if no photos, processing is done.
+          setIsUploading(false); // Processing finished
+          if (eventSourceRef.current) {
+            eventSourceRef.current.close();
+            eventSourceRef.current = null;
+          }
+        });
+
+        es.addEventListener('processingError', (event) => {
+          const data = JSON.parse(event.data);
+          console.error('[GuestPhotos] SSE processingError:', data);
+          setUploadStatusMessage(`אירעה שגיאה כללית בעיבוד: ${data.error}. נסו שוב.`);
+          setIsUploading(false);
+          if (eventSourceRef.current) {
+            eventSourceRef.current.close();
+            eventSourceRef.current = null;
+          }
+        });
+
+        es.onerror = (error) => {
+          console.error('[GuestPhotos] SSE Error:', error);
+          setUploadStatusMessage("החיבור לעדכוני התמונות אבד. אנא נסו להעלות את הסלפי שוב.");
+          setIsUploading(false);
+          if (eventSourceRef.current) {
+            eventSourceRef.current.close(); // Ensure it's closed
+            eventSourceRef.current = null;
+          }
+        };
+
       } else {
-        setUploadStatusMessage(result.message || "העלאת הסלפי נכשלה. אנא נסו שוב.")
-        setUploadSuccess(false)
+        setUploadStatusMessage(result.message || "העלאת הסלפי נכשלה או שלא זוהו פנים. אנא נסו שוב.");
+        setUploadSuccess(false);
+        setIsUploading(false); // Selfie upload failed, stop uploading state
       }
     } catch (error) {
-      console.error("[GuestPhotos] Error:", error)
-      setUploadStatusMessage("אירעה שגיאה. אנא נסו שוב.")
-      setUploadSuccess(false)
+      console.error("[GuestPhotos] Error in handleSelfieSubmit:", error);
+      setUploadStatusMessage("אירעה שגיאה בהעלאת הסלפי. אנא נסו שוב.");
+      setUploadSuccess(false);
+      setIsUploading(false);
     } finally {
-      if (!uploadSuccess) {
-        setIsUploading(false)
-      }
+      // setIsUploading is now managed by SSE events or direct failure
       if (fileInputRef.current) {
-        fileInputRef.current.value = ""
+        fileInputRef.current.value = ""; // Clear file input
       }
     }
   }
 
-  // --- Mock photo display logic ---
+  // --- Mock photo display logic (remains the same) ---
    const togglePhotoSelection = (photo: string) => {
     setSelectedPhotos((prev) => (prev.includes(photo) ? prev.filter((p) => p !== photo) : [...prev, photo]))
   }
