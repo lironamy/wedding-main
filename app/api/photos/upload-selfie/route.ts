@@ -207,12 +207,14 @@ export async function POST(request: Request) {
                                             boundingBox: detection.detection.box
                                         });
                                         foundMatch = true;
+                                        // Save the photo immediately after a match is found
+                                        photo.isProcessed = true;
+                                        await photo.save();
                                     }
                                 }
                             }
-                            
                             // Save the photo if we found a match or if it's unprocessed
-                            if (foundMatch || !photo.isProcessed) {
+                            if (!foundMatch && !photo.isProcessed) {
                                 photo.isProcessed = true;
                                 await photo.save();
                             }

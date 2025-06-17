@@ -30,7 +30,12 @@ export async function GET(request: Request) {
 
         // Find all photos with matched faces
         const photos = await Photo.find({
-            'detectedFaces.matchedUser': { $exists: true, $ne: null }
+            isProcessed: true,
+            'detectedFaces': {
+                $elemMatch: {
+                    matchedUser: { $exists: true, $ne: null }
+                }
+            }
         }).populate({
             path: 'detectedFaces.matchedUser',
             select: 'name',

@@ -3,6 +3,7 @@ import * as canvas from 'canvas';
 import path from 'path';
 import { Canvas, createCanvas, loadImage } from 'canvas';
 import sharp from 'sharp';
+import fetch from 'node-fetch';
 
 // Destructure canvas elements and patch them into faceapi.env
 const { Image, ImageData } = canvas;
@@ -22,102 +23,76 @@ export async function loadModels() {
   }
   try {
     console.log('Loading FaceAPI models from:', MODELS_URL);
-    // Ensure these model files exist in your /public/models directory
-    await faceapi.nets.ssdMobilenetv1.loadFromDisk(MODELS_URL); // Keep SsdMobilenetv1 for now, or remove if exclusively using Tiny
-    await faceapi.nets.tinyFaceDetector.loadFromDisk(MODELS_URL); // Add TinyFaceDetector model
-    await faceapi.nets.faceLandmark68Net.loadFromDisk(MODELS_URL);
-    await faceapi.nets.faceRecognitionNet.loadFromDisk(MODELS_URL);
-    // Optional: await faceapi.nets.ageGenderNet.loadFromDisk(MODELS_URL); // Not currently used
-    // Optional: await faceapi.nets.faceExpressionNet.loadFromDisk(MODELS_URL); // Not currently used
+    // Load both detectors for better accuracy
+    await Promise.all([
+      faceapi.nets.ssdMobilenetv1.loadFromDisk(MODELS_URL),
+      faceapi.nets.faceLandmark68Net.loadFromDisk(MODELS_URL),
+      faceapi.nets.faceRecognitionNet.loadFromDisk(MODELS_URL),
+      faceapi.nets.tinyFaceDetector.loadFromDisk(MODELS_URL)
+    ]);
 
     modelsLoaded = true;
     console.log('FaceAPI models loaded successfully.');
   } catch (error: any) {
     console.error('Error loading FaceAPI models:', error);
-    // Depending on your application, you might want to throw this error
-    // or handle it in a way that allows the app to run with limited functionality.
     throw new Error(`Failed to load FaceAPI models: ${error.message}`);
   }
 }
 
-const MAX_DIMENSION = 800;
+const MAX_DIMENSION = 1200;
 
 // Function to convert image buffer to a Canvas Image element for face-api.js
-export async function bufferToImage(inputBuffer: Buffer): Promise<canvas.Image> {
-    let processedBuffer = inputBuffer;
-    let originalWidth: number | undefined;
-    let originalHeight: number | undefined;
-
-    try {
-        const metadata = await sharp(inputBuffer).metadata();
-        originalWidth = metadata.width;
-        originalHeight = metadata.height;
-
-        if (originalWidth && originalHeight && (originalWidth > MAX_DIMENSION || originalHeight > MAX_DIMENSION)) {
-            console.log(`[bufferToImage] Original image dimensions ${originalWidth}x${originalHeight} exceed max dimension ${MAX_DIMENSION}px. Resizing.`);
-            processedBuffer = await sharp(inputBuffer)
-                .resize({
-                    width: MAX_DIMENSION,
-                    height: MAX_DIMENSION,
-                    fit: 'inside', // 'cover' would crop, 'contain' might add padding, 'fill' would distort, 'inside' resizes down to fit
-                    withoutEnlargement: true, // Do not enlarge if image is smaller than MAX_DIMENSION
-                })
-                .toBuffer();
-
-            const newMetadata = await sharp(processedBuffer).metadata();
-            console.log(`[bufferToImage] Image resized from ${originalWidth}x${originalHeight} to ${newMetadata.width}x${newMetadata.height}`);
-        }
-    } catch (sharpError) {
-        console.warn(`[bufferToImage] Sharp processing (metadata/resize) failed. Using original buffer. Error:`, sharpError);
-        processedBuffer = inputBuffer; // Ensure we fall back to original buffer
-    }
-
+export async function bufferToImage(buffer: Buffer): Promise<canvas.Image> {
+    const image = new canvas.Image();
     return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => resolve(img);
-        img.onerror = async (_error: unknown) => {
-            console.warn(`[bufferToImage] Direct loading of image buffer failed (was_resized: ${processedBuffer !== inputBuffer}). Attempting PNG conversion.`);
-            try {
-                // Convert the image to PNG using sharp, using the (potentially resized) processedBuffer
-                const pngBuffer = await sharp(processedBuffer)
-                    .png() // Convert to PNG format
-                    .toBuffer();
-                
-                // Create a temporary canvas to draw the image and then get its buffer
-                // This is a workaround for some image types that might not load directly into canvas.Image
-                // but can be handled by sharp and then drawn to a canvas.
-                const tempCanvas = createCanvas(1, 1); // Initial small size
-                const tempCtx = tempCanvas.getContext('2d');
-                
-                const tempImg = new Image();
-                tempImg.onload = () => {
-                    tempCanvas.width = tempImg.width; // Resize canvas to actual image dimensions
-                    tempCanvas.height = tempImg.height;
-                    tempCtx.drawImage(tempImg, 0, 0);
-                    // Now use the buffer from our canvas, which should be a compatible PNG format
-                    img.src = tempCanvas.toBuffer('image/png');
-                    // This re-triggers img.onload, which should then resolve the main promise.
-                };
-                tempImg.onerror = (pngConvertErr) => {
-                    console.error('[bufferToImage] Error loading image after PNG conversion:', pngConvertErr);
-                    reject(pngConvertErr); // Reject the main promise if PNG conversion also fails
-                };
-                tempImg.src = pngBuffer; // Load the PNG buffer into tempImg
-            } catch (convertErr) {
-                console.error('[bufferToImage] Error during PNG conversion fallback:', convertErr);
-                reject(convertErr); // Reject the main promise if sharp PNG conversion fails
+        image.onload = () => {
+            // Create a canvas with appropriate dimensions
+            const maxDimension = 1600; // Increased from 1200
+            let width = image.width;
+            let height = image.height;
+            
+            // Calculate new dimensions while maintaining aspect ratio
+            if (width > height && width > maxDimension) {
+                height = Math.round((height * maxDimension) / width);
+                width = maxDimension;
+            } else if (height > maxDimension) {
+                width = Math.round((width * maxDimension) / height);
+                height = maxDimension;
             }
+
+            // Create canvas and context
+            const cvs = canvas.createCanvas(width, height);
+            const ctx = cvs.getContext('2d');
+
+            // Apply image processing for better face detection
+            ctx.imageSmoothingEnabled = true;
+
+            // Draw image with proper dimensions
+            ctx.drawImage(image, 0, 0, width, height);
+
+            // Convert back to image
+            const processedImage = new canvas.Image();
+            processedImage.src = cvs.toDataURL();
+            
+            resolve(processedImage);
         };
-        img.src = processedBuffer; // Assign the (possibly resized) buffer to img.src
+        image.onerror = (err) => reject(err);
+        image.src = buffer;
     });
 }
 
 // Example of how to get a face descriptor (will be used in other parts)
-export async function getFaceDetectorOptions() {
-    // Using TinyFaceDetector for faster processing, potentially lower accuracy
-    // Common inputSizes: 128, 160, 224, 320, 416, 512, 608. Larger is more accurate but slower.
-    // scoreThreshold: minimum confidence score to consider a detection a face.
-    return new faceapi.TinyFaceDetectorOptions({ inputSize: 416, scoreThreshold: 0.5 });
+export function getFaceDetectorOptions(detector: 'ssd' | 'tiny' = 'ssd') {
+    if (detector === 'tiny') {
+        return new faceapi.TinyFaceDetectorOptions({
+            inputSize: 800,
+            scoreThreshold: 0.2
+        });
+    }
+    return new faceapi.SsdMobilenetv1Options({
+        minConfidence: 0.2,
+        maxResults: 20
+    });
 }
 
 // Initialize models on server startup (e.g., in your main server file or a global setup)

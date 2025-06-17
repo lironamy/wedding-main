@@ -42,7 +42,15 @@ export default function DashboardPage() {
   const [processingPhotosMessage, setProcessingPhotosMessage] = useState<string | null>(null)
   const [isProcessingPhotos, setIsProcessingPhotos] = useState(false)
   const [matchedPhotos, setMatchedPhotos] = useState<Array<{ photoUrl: string; guestName: string; confidence: number }>>([])
-  const [notMatchedPhotos, setNotMatchedPhotos] = useState<Array<{ photoUrl: string; detectedFaces: number }>>([])
+  const [notMatchedPhotos, setNotMatchedPhotos] = useState<Array<{ photoUrl: string; detectedFaces: number; guestName: string; confidence: number }>>([])
+  const [allPhotos, setAllPhotos] = useState<Array<{
+    photoUrl: string;
+    isProcessed: boolean;
+    totalFacesDetected: number;
+    matchedFaces: number;
+    unmatchedFaces: number;
+    status: string;
+  }>>([])
   const [selectedTab, setSelectedTab] = useState('photos')
 
   useEffect(() => {
@@ -262,9 +270,8 @@ export default function DashboardPage() {
     try {
       const matchedResponse = await fetch('/api/photos/matched-photos');
       const matchedData = await matchedResponse.json();
-      console.log('Matched Data:', matchedData); // Debug log
+      console.log('Matched Data:', matchedData);
       if (matchedResponse.ok && matchedData.matches) {
-        // Process and validate confidence values
         const processedMatches = matchedData.matches.map((match: { photoUrl: string; guestName: string; confidence: number }) => {
           const confidence = typeof match.confidence === 'number' && !isNaN(match.confidence)
             ? Math.max(0, Math.min(1, match.confidence))
@@ -298,7 +305,7 @@ export default function DashboardPage() {
     try {
       const notMatchedResponse = await fetch('/api/photos/not-matched-photos');
       const notMatchedData = await notMatchedResponse.json();
-      console.log('Not Matched Data:', notMatchedData); // Debug log
+      console.log('Not Matched Data:', notMatchedData);
       if (notMatchedResponse.ok && notMatchedData.photos) {
         setNotMatchedPhotos(notMatchedData.photos);
       } else {
@@ -307,6 +314,22 @@ export default function DashboardPage() {
     } catch (error) {
       console.error('Error fetching not matched photos:', error);
       setNotMatchedPhotos([]);
+    }
+  };
+
+  const fetchAllPhotos = async () => {
+    try {
+      const response = await fetch('/api/photos/all-photos');
+      const data = await response.json();
+      console.log('All Photos Data:', data);
+      if (response.ok && data.photos) {
+        setAllPhotos(data.photos);
+      } else {
+        setAllPhotos([]);
+      }
+    } catch (error) {
+      console.error('Error fetching all photos:', error);
+      setAllPhotos([]);
     }
   };
 
@@ -320,10 +343,10 @@ export default function DashboardPage() {
       const result = await response.json();
       setProcessingPhotosMessage(result.message || (response.ok ? "עיבוד תמונות החתונה החל בהצלחה." : "כישלון בתחילת עיבוד תמונות החתונה."));
 
-      // Fetch matched photos after processing
       if (response.ok) {
         await fetchMatchedPhotos();
         await fetchNotMatchedPhotos();
+        await fetchAllPhotos();
       }
     } catch (error) {
       console.error("Wedding photo processing error:", error);
@@ -337,6 +360,7 @@ export default function DashboardPage() {
     if (selectedTab === 'processing') {
       fetchMatchedPhotos();
       fetchNotMatchedPhotos();
+      fetchAllPhotos();
     }
   }, [selectedTab]);
 
@@ -594,6 +618,35 @@ export default function DashboardPage() {
                       ))}
                     </div>
                   )}
+                </div>
+
+                {/* New section for all photos */}
+                <div className="mt-8">
+                  <h2 className="text-2xl font-bold mb-4">סטטוס כל התמונות</h2>
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {allPhotos.map((photo, index) => (
+                      <div key={index} className="border rounded-lg p-4 bg-white shadow-sm">
+                        <div className="aspect-w-16 aspect-h-9 mb-2">
+                          <img
+                            src={photo.photoUrl}
+                            alt={`Photo ${index + 1}`}
+                            className="object-cover rounded-lg"
+                          />
+                        </div>
+                        <div className="space-y-1">
+                          <p className="font-semibold">סטטוס: {photo.status}</p>
+                          <p>מעובד: {photo.isProcessed ? 'כן' : 'לא'}</p>
+                          <p>מספר פנים שזוהו: {photo.totalFacesDetected}</p>
+                          {photo.totalFacesDetected > 0 && (
+                            <>
+                              <p>פנים שזוהו בהתאמה: {photo.matchedFaces}</p>
+                              <p>פנים שלא זוהו בהתאמה: {photo.unmatchedFaces}</p>
+                            </>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </CardContent>
             </Card>

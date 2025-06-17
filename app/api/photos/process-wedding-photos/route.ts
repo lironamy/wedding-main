@@ -31,13 +31,14 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
         }
         // End Optional Auth
 
-        // Get only photos that have not been processed yet
-        const photosToProcess = await Photo.find({ isProcessed: false });
+        // Get all photos, regardless of processing status
+        const photosToProcess = await Photo.find({});
         if (photosToProcess.length === 0) {
-            return NextResponse.json({ message: 'No unprocessed wedding photos found to process.' }, { status: 200 });
+            return NextResponse.json({ message: 'No wedding photos found to process.' }, { status: 200 });
         }
 
         console.log(`Found ${photosToProcess.length} photos to process`);
+        console.log('Photo IDs:', photosToProcess.map(p => p._id));
 
         // Fetch all guest users with face encodings
         const guestUsersWithEncodings = await User.find({
@@ -88,7 +89,7 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
             let photoMatchDetails: Array<{ photoId: string; guestName: string; confidence: number; distance: number }> = [];
 
             try {
-                console.log(`[Photo ${photo._id}] Starting processing for image URL: ${photo.imageUrl}`);
+                console.log(`\n[Photo ${photo._id}] Starting processing for image URL: ${photo.imageUrl}`);
                 const imageResponse = await fetch(photo.imageUrl);
                 if (!imageResponse.ok) {
                     console.error(`[Photo ${photo._id}] Failed to fetch wedding photo: ${photo.imageUrl}. Status: ${imageResponse.statusText}`);
@@ -98,25 +99,76 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
                 const image = await bufferToImage(imageBuffer);
 
                 if (image) {
-                    console.log(`[Photo ${photo._id}] Image loaded. Type: ${typeof image}, Shape: ${image.width}x${image.height}`);
+                    console.log(`[Photo ${photo._id}] Image loaded successfully. Dimensions: ${image.width}x${image.height}`);
                 } else {
                     console.warn(`[Photo ${photo._id}] bufferToImage returned null or undefined.`);
-                     return { success: false, photoId: photo._id, error: `Failed to load image content`, details: { photoFacesDetected, photoFacesMatched, photoMatchDetails } };
+                    return { success: false, photoId: photo._id, error: `Failed to load image content`, details: { photoFacesDetected, photoFacesMatched, photoMatchDetails } };
                 }
 
-                const detectionOptions = await getFaceDetectorOptions();
-                const detections = await faceapi.detectAllFaces(image as unknown as HTMLImageElement, detectionOptions)
-                                              .withFaceLandmarks()
-                                              .withFaceDescriptors();
+                // Try SSD MobileNet first
+                console.log(`[Photo ${photo._id}] Attempting face detection with SSD MobileNet...`);
+                let detections = await faceapi.detectAllFaces(image as unknown as HTMLImageElement, new faceapi.SsdMobilenetv1Options({ 
+                    minConfidence: 0.2, // Lowered from 0.3
+                    maxResults: 20 // Increased from 10
+                }))
+                    .withFaceLandmarks()
+                    .withFaceDescriptors();
+
+                console.log(`[Photo ${photo._id}] SSD MobileNet found ${detections.length} faces with confidence threshold 0.2`);
+
+                // If no faces found with SSD MobileNet, try with even lower confidence
+                if (detections.length === 0) {
+                    console.log(`[Photo ${photo._id}] Retrying SSD MobileNet with lower confidence...`);
+                    detections = await faceapi.detectAllFaces(image as unknown as HTMLImageElement, new faceapi.SsdMobilenetv1Options({ 
+                        minConfidence: 0.1,
+                        maxResults: 20
+                    }))
+                        .withFaceLandmarks()
+                        .withFaceDescriptors();
+                    
+                    console.log(`[Photo ${photo._id}] SSD MobileNet found ${detections.length} faces with confidence threshold 0.1`);
+                }
+
+                // If still no faces found, try TinyFaceDetector
+                if (detections.length === 0) {
+                    console.log(`[Photo ${photo._id}] No faces found with SSD MobileNet, trying TinyFaceDetector...`);
+                    detections = await faceapi.detectAllFaces(image as unknown as HTMLImageElement, new faceapi.TinyFaceDetectorOptions({ 
+                        inputSize: 800, // Increased from 608
+                        scoreThreshold: 0.2 // Lowered from 0.3
+                    }))
+                        .withFaceLandmarks()
+                        .withFaceDescriptors();
+                    
+                    console.log(`[Photo ${photo._id}] TinyFaceDetector found ${detections.length} faces`);
+                }
+
+                // If still no faces, try one last time with TinyFaceDetector and even lower threshold
+                if (detections.length === 0) {
+                    console.log(`[Photo ${photo._id}] Retrying TinyFaceDetector with lower threshold...`);
+                    detections = await faceapi.detectAllFaces(image as unknown as HTMLImageElement, new faceapi.TinyFaceDetectorOptions({ 
+                        inputSize: 800,
+                        scoreThreshold: 0.1
+                    }))
+                        .withFaceLandmarks()
+                        .withFaceDescriptors();
+                    
+                    console.log(`[Photo ${photo._id}] TinyFaceDetector found ${detections.length} faces with lower threshold`);
+                }
 
                 photoFacesDetected = detections.length;
-                console.log(`[Photo ${photo._id}] Found ${detections.length} faces.`);
+                console.log(`[Photo ${photo._id}] Face detection complete. Found ${detections.length} faces. Image dimensions: ${image.width}x${image.height}`);
+
+                if (detections.length === 0) {
+                    console.log(`[Photo ${photo._id}] No faces detected with any detector. This is unexpected for an image that should contain faces.`);
+                }
 
                 photo.detectedFaces = []; // Clear existing detected faces
 
                 if (detections.length > 0) {
+                    console.log(`[Photo ${photo._id}] Processing ${detections.length} detected faces...`);
                     for (const detection of detections) {
-                        console.log(`[Photo ${photo._id}] Processing detected face. Descriptor length: ${detection.descriptor.length}, First 5 values: ${detection.descriptor.slice(0, 5)}`);
+                        console.log(`[Photo ${photo._id}] Processing face ${photoFacesDetected - detections.length + 1}/${detections.length}`);
+                        console.log(`[Photo ${photo._id}] Face bounding box:`, detection.detection.box);
 
                         let minDistance = Infinity;
                         let closestGuestName = '';
@@ -124,7 +176,6 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
                         guestUsersWithEncodings.forEach(guest => {
                             const guestDescriptor = new Float32Array(guest.faceEncoding!);
                             const dist = faceapi.euclideanDistance(detection.descriptor, guestDescriptor);
-                            // console.log(`[Photo ${photo._id}] Distance to guest ${guest.name} (${guest._id}): ${dist}`); // Potentially too verbose
                             if (dist < minDistance) {
                                 minDistance = dist;
                                 closestGuestName = guest.name;
@@ -170,10 +221,13 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
                             console.log(`[Photo ${photo._id}] NO MATCH FOUND: Distance: ${bestMatch.distance}, Threshold: ${FACE_MATCH_DISTANCE_THRESHOLD}, Label: ${bestMatch.label}`);
                         }
                     }
+                } else {
+                    console.log(`[Photo ${photo._id}] No faces detected in the image.`);
                 }
+
                 photo.isProcessed = true;
                 await photo.save();
-                console.log(`[Photo ${photo._id}] Processing successful. Saved to DB.`);
+                console.log(`[Photo ${photo._id}] Processing complete. Status: ${photoFacesDetected} faces detected, ${photoFacesMatched} faces matched.`);
                 return { success: true, photoId: photo._id, details: { photoFacesDetected, photoFacesMatched, photoMatchDetails } };
             } catch (error: any) {
                 console.error(`[Photo ${photo._id}] Error during processing (image URL: ${photo.imageUrl}):`, error);

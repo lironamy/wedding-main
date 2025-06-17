@@ -13,6 +13,7 @@ export default function GuestPhotosPage() {
   const [uploadStatusMessage, setUploadStatusMessage] = useState<string | null>(null)
   const [uploadSuccess, setUploadSuccess] = useState(false)
   const [processingProgress, setProcessingProgress] = useState<{ current: number; total: number } | null>(null)
+  const [progressPercent, setProgressPercent] = useState<number | null>(null)
 
   // This state will be used when fetching actual photos later
   const [photosReady, setPhotosReady] = useState(false)
@@ -116,6 +117,7 @@ export default function GuestPhotosPage() {
     setUploadStatusMessage("מעלה את הסלפי שלך...")
     setUploadSuccess(false)
     setProcessingProgress(null)
+    setProgressPercent(null)
 
     const formData = new FormData()
     formData.append("files", file)
@@ -128,41 +130,57 @@ export default function GuestPhotosPage() {
       })
       const result = await response.json()
 
-      if (response.ok && result.faceDetected) {
+      if (response.ok && result.faceDetected && result.guestId) {
         setUploadStatusMessage("סלפי הועלה בהצלחה! מחפש את התמונות שלך...")
         setUploadSuccess(true)
-        
-        // Start polling for processing progress
-        const progressInterval = setInterval(async () => {
+        // Start polling for processing progress and new photos
+        let pollTimeout: NodeJS.Timeout | null = null;
+        let lastPhotoCount = 0;
+        const pollProgressAndPhotos = async () => {
+          // Poll progress
           const progressResponse = await fetch(`/api/photos/processing-progress?guestId=${result.guestId}`)
           const progressData = await progressResponse.json()
-          
           if (progressData.processing) {
             setProcessingProgress({
               current: progressData.current,
               total: progressData.total
             })
-            setUploadStatusMessage(`מעבד תמונות... ${progressData.current}/${progressData.total}`)
+            const percent = progressData.total > 0 ? Math.round((progressData.current / progressData.total) * 100) : 0;
+            setProgressPercent(percent);
+            setUploadStatusMessage(`מעבד תמונות... ${progressData.current}/${progressData.total} (${percent}%)`)
           } else {
-            clearInterval(progressInterval)
             setProcessingProgress(null)
+            setProgressPercent(null)
             setUploadStatusMessage("העיבוד הושלם! מחפש את התמונות שלך...")
-            // Fetch actual photos after processing is complete
-            await fetchGuestPhotos()
           }
-        }, 1000) // Poll every second
-
-        // Clear interval after 2 minutes (timeout)
+          // Poll photos
+          const photosResponse = await fetch('/api/photos/my-photos');
+          const photosData = await photosResponse.json();
+          if (photosResponse.ok && photosData.photos) {
+            setGuestPhotos(photosData.photos.map((photo: any) => photo.imageUrl));
+            if (photosData.photos.length > lastPhotoCount) {
+              lastPhotoCount = photosData.photos.length;
+              setPhotosReady(true);
+            }
+          }
+          // Continue polling if not done
+          if (progressData.processing) {
+            pollTimeout = setTimeout(pollProgressAndPhotos, 1500);
+          }
+        };
+        pollProgressAndPhotos();
+        // Fallback: after 2 minutes, stop polling
         setTimeout(() => {
-          clearInterval(progressInterval)
+          if (pollTimeout) clearTimeout(pollTimeout);
           setProcessingProgress(null)
+          setProgressPercent(null)
           setUploadStatusMessage("העיבוד הושלם! מחפש את התמונות שלך...")
           fetchGuestPhotos()
         }, 120000)
       } else if (response.ok && !result.faceDetected) {
-         setUploadStatusMessage(result.message || "הסלפי הועלה, אך לא הצלחנו לזהות פנים בתמונה. אנא נסו להעלות תמונה ברורה יותר של הפנים שלכם.")
-         setUploadSuccess(false)
-         setProfileImagePreview(null)
+        setUploadStatusMessage(result.message || "הסלפי הועלה, אך לא הצלחנו לזהות פנים בתמונה. אנא נסו להעלות תמונה ברורה יותר של הפנים שלכם.")
+        setUploadSuccess(false)
+        setProfileImagePreview(null)
       } else {
         setUploadStatusMessage(result.message || "העלאת הסלפי נכשלה. אנא נסו שוב.")
         setUploadSuccess(false)
@@ -255,11 +273,12 @@ export default function GuestPhotosPage() {
                         <div className="w-full bg-gray-200 rounded-full h-2.5">
                           <div 
                             className="bg-pink-500 h-2.5 rounded-full transition-all duration-300" 
-                            style={{ width: `${(processingProgress.current / processingProgress.total) * 100}%` }}
+                            style={{ width: `${progressPercent ?? 0}%` }}
                           ></div>
                         </div>
                         <p className="text-sm mt-1">
                           {processingProgress.current} מתוך {processingProgress.total} תמונות
+                          {progressPercent !== null && ` (${progressPercent}%)`}
                         </p>
                       </div>
                     )}
