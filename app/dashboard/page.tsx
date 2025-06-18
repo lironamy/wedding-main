@@ -12,6 +12,7 @@ import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHeader, TableRow, TableHead } from "@/components/ui/table"
 import Image from "next/image"
+import { FixedSizeGrid as Grid } from 'react-window'
 
 interface MatchedPhoto {
     photoUrl: string;
@@ -59,6 +60,8 @@ export default function DashboardPage() {
     status: string;
   }>>([])
   const [selectedTab, setSelectedTab] = useState('photos')
+
+  const [imageLoadingStates, setImageLoadingStates] = useState<{ [key: string]: boolean }>({});
 
   useEffect(() => {
     if (!isLoading && !user) {
@@ -367,6 +370,70 @@ export default function DashboardPage() {
     }
   }, [selectedTab]);
 
+  const handleImageLoad = (imageUrl: string) => {
+    setImageLoadingStates(prev => ({
+      ...prev,
+      [imageUrl]: true
+    }));
+  };
+
+  const PhotoGrid = ({ photos }: { photos: typeof userPhotos }) => {
+    const columnCount = window.innerWidth >= 1024 ? 4 : window.innerWidth >= 768 ? 3 : 2;
+    const rowCount = Math.ceil(photos.length / columnCount);
+    const cellSize = Math.floor(window.innerWidth / columnCount);
+
+    const Cell = ({ columnIndex, rowIndex, style }: any) => {
+      const index = rowIndex * columnCount + columnIndex;
+      if (index >= photos.length) return null;
+      const photo = photos[index];
+
+      return (
+        <div style={style}>
+          <div className="p-2">
+            <div className={`relative aspect-square group ${imageLoadingStates[photo.imageUrl] ? 'opacity-100' : 'opacity-40'}`}>
+              <img
+                src={photo.imageUrl.split('/upload/').join('/upload/c_scale,w_400,f_auto,q_auto/')}
+                alt={`תמונת חתונה ${index + 1}`}
+                className="w-full h-full object-cover rounded-lg"
+                loading="lazy"
+                onLoad={() => handleImageLoad(photo.imageUrl)}
+              />
+              {!imageLoadingStates[photo.imageUrl] && (
+                <div className="absolute inset-0 flex items-center justify-center">
+                  <Loader2 className="h-6 w-6 animate-spin text-pink-500" />
+                </div>
+              )}
+              <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-40 transition-opacity rounded-lg flex items-center justify-center">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="opacity-0 group-hover:opacity-100 transition-opacity text-white hover:text-white hover:bg-pink-500"
+                  onClick={() => window.open(photo.imageUrl, '_blank')}
+                >
+                  <Download className="h-4 w-4 ml-2" />
+                  הורד
+                </Button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    return (
+      <Grid
+        columnCount={columnCount}
+        columnWidth={cellSize}
+        height={Math.min(window.innerHeight * 0.8, rowCount * cellSize)}
+        rowCount={rowCount}
+        rowHeight={cellSize}
+        width={window.innerWidth - 48}
+      >
+        {Cell}
+      </Grid>
+    );
+  };
+
   if (isLoading) {
     return (
       <div className="min-h-screen flex items-center justify-center">
@@ -504,28 +571,8 @@ export default function DashboardPage() {
                     <Loader2 className="h-8 w-8 animate-spin text-pink-500" />
                   </div>
                 ) : userPhotos.length > 0 ? (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
-                    {userPhotos.map((photo, index) => (
-                      <div key={index} className="relative aspect-square group">
-                        <img
-                          src={photo.imageUrl.split('/upload/').join('/upload/w_300,f_auto,q_auto/')}
-                          alt={`תמונת חתונה ${index + 1}`}
-                          className="w-full h-full object-cover rounded-lg"
-                          loading="lazy"
-                        />
-                        <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-40 transition-opacity rounded-lg flex items-center justify-center">
-                          <Button
-                            variant="ghost"
-                            size="sm"
-                            className="opacity-0 group-hover:opacity-100 transition-opacity text-white hover:text-white hover:bg-pink-500"
-                            onClick={() => window.open(photo.imageUrl, '_blank')}
-                          >
-                            <Download className="h-4 w-4 ml-2" />
-                            הורד
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
+                  <div className="grid grid-cols-1">
+                    <PhotoGrid photos={userPhotos} />
                   </div>
                 ) : (
                   <div className="text-center py-8 text-gray-500">
@@ -553,10 +600,12 @@ export default function DashboardPage() {
                       <div key={photoIndex} className="relative group">
                         <div className="relative aspect-square overflow-hidden rounded-lg">
                           <Image
-                            src={photo.photoUrl}
+                            src={photo.photoUrl.split('/upload/').join('/upload/c_scale,w_400,f_auto,q_auto/')}
                             alt={`תמונה ${photoIndex + 1}`}
                             fill
                             className="object-cover"
+                            loading="lazy"
+                            sizes="(max-width: 768px) 100vw, (max-width: 1200px) 50vw, 33vw"
                           />
                           <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
                             <div className="absolute bottom-0 left-0 right-0 p-4 text-white">
@@ -592,7 +641,7 @@ export default function DashboardPage() {
                         <Card key={index} className="overflow-hidden">
                           <div className="relative aspect-square w-32 h-32 mx-auto">
                             <img
-                              src={photo.photoUrl.split('/upload/').join('/upload/w_300,f_auto,q_auto/')}
+                              src={photo.photoUrl.split('/upload/').join('/upload/c_scale,w_300,f_auto,q_auto/')}
                               alt={`תמונה ${index + 1}`}
                               className="object-cover w-full h-full"
                               loading="lazy"
@@ -618,7 +667,7 @@ export default function DashboardPage() {
                       <div key={index} className="border rounded-lg p-4 bg-white shadow-sm">
                         <div className="aspect-w-16 aspect-h-9 mb-2">
                           <img
-                            src={photo.photoUrl}
+                            src={photo.photoUrl.split('/upload/').join('/upload/c_scale,w_400,f_auto,q_auto/')}
                             alt={`Photo ${index + 1}`}
                             className="object-cover rounded-lg"
                           />
