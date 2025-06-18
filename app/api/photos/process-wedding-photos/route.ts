@@ -73,8 +73,8 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
             label: d.label,
             descriptorLength: d.descriptors[0].length
         })));
-        const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, FACE_MATCH_THRESHOLD);
-        console.log(`\nCreated face matcher with threshold: ${FACE_MATCH_THRESHOLD}`);
+        const faceMatcher = new faceapi.FaceMatcher(labeledFaceDescriptors, FACE_MATCH_DISTANCE_THRESHOLD);
+        console.log(`\nCreated face matcher with threshold: ${FACE_MATCH_DISTANCE_THRESHOLD}`);
 
         // Log model file paths (assuming loadModels logs this, but add explicit log)
         console.log('FaceAPI model paths:', process.env.FACEAPI_MODELS_PATH || 'default ./public/models');
@@ -172,65 +172,49 @@ export async function POST(request: Request) { // Or GET, if triggered by a cron
                 if (detections.length > 0) {
                     console.log(`[Photo ${photo._id}] Processing ${detections.length} detected faces...`);
                     
-                    // Create face matchers for all guests
-                    const faceMatchers = guestUsersWithEncodings.map(guest => {
-                        const guestDescriptor = new faceapi.LabeledFaceDescriptors(
-                            (guest._id as unknown as string).toString(),
-                            [new Float32Array(guest.faceEncoding!)]
-                        );
-                        const matcher = new faceapi.FaceMatcher([guestDescriptor], FACE_MATCH_THRESHOLD);
-                        return {
-                            matcher,
-                            guestId: (guest._id as unknown as string).toString(),
-                            guestName: guest.name
-                        };
-                    });
-
                     // Process each detected face
                     for (let faceIndex = 0; faceIndex < detections.length; faceIndex++) {
                         const detection = detections[faceIndex];
                         console.log(`[Photo ${photo._id}] Processing face ${faceIndex + 1}/${detections.length}`);
                         console.log(`[Photo ${photo._id}] Face bounding box:`, detection.detection.box);
 
-                        // Check this face against all guests
-                        let bestMatch: { distance: number; guestId: string; guestName: string } | null = null;
-                        
-                        // Try to match against each guest
-                        for (const { matcher, guestId, guestName } of faceMatchers) {
-                            const match = matcher.findBestMatch(detection.descriptor);
+                        // USE THE MAIN faceMatcher (passed as argument to processPhoto)
+                        const bestMatchOverall = faceMatcher.findBestMatch(detection.descriptor);
+
+                        if (bestMatchOverall.label !== 'unknown') { // Simplified condition
+                            const matchedGuest = guestUsersWithEncodings.find(g => (g._id as unknown as string).toString() === bestMatchOverall.label);
                             
-                            if (match.label !== 'unknown' && match.distance < FACE_MATCH_DISTANCE_THRESHOLD) {
-                                if (!bestMatch || match.distance < bestMatch.distance) {
-                                    bestMatch = {
-                                        distance: match.distance,
-                                        guestId: guestId,
-                                        guestName: guestName
-                                    };
-                                }
+                            if (matchedGuest) {
+                                const matchConfidence = Math.max(0, Math.min(1, 1 - bestMatchOverall.distance));
+                                photoFacesMatched++;
+
+                                console.log(`[Photo ${photo._id}] MATCH FOUND for face ${faceIndex + 1}: Guest: ${matchedGuest.name}, Raw distance: ${bestMatchOverall.distance}, Calculated confidence: ${matchConfidence}`);
+
+                                photoMatchDetails.push({
+                                    photoId: (photo._id as mongoose.Types.ObjectId).toString(),
+                                    guestName: matchedGuest.name,
+                                    confidence: matchConfidence,
+                                    distance: bestMatchOverall.distance
+                                });
+
+                                photo.detectedFaces.push({
+                                    faceDescriptorInPhoto: Array.from(detection.descriptor),
+                                    matchedUser: new mongoose.Types.ObjectId(bestMatchOverall.label),
+                                    matchConfidence: matchConfidence,
+                                    boundingBox: detection.detection.box
+                                });
+                            } else {
+                                console.warn(`[Photo ${photo._id}] Match found with label ${bestMatchOverall.label}, but no corresponding guest user found.`);
+                                // Still save the detection, but without a matched user
+                                photo.detectedFaces.push({
+                                    faceDescriptorInPhoto: Array.from(detection.descriptor),
+                                    matchedUser: undefined,
+                                    matchConfidence: 0,
+                                    boundingBox: detection.detection.box
+                                });
                             }
-                        }
-
-                        if (bestMatch) {
-                            const matchConfidence = Math.max(0, Math.min(1, 1 - bestMatch.distance));
-                            photoFacesMatched++;
-
-                            console.log(`[Photo ${photo._id}] MATCH FOUND for face ${faceIndex + 1}: Guest: ${bestMatch.guestName}, Raw distance: ${bestMatch.distance}, Calculated confidence: ${matchConfidence}`);
-                            
-                            photoMatchDetails.push({
-                                photoId: (photo._id as mongoose.Types.ObjectId).toString(),
-                                guestName: bestMatch.guestName,
-                                confidence: matchConfidence,
-                                distance: bestMatch.distance
-                            });
-
-                            photo.detectedFaces.push({
-                                faceDescriptorInPhoto: Array.from(detection.descriptor),
-                                matchedUser: new mongoose.Types.ObjectId(bestMatch.guestId),
-                                matchConfidence: matchConfidence,
-                                boundingBox: detection.detection.box
-                            });
                         } else {
-                            console.log(`[Photo ${photo._id}] NO MATCH FOUND for face ${faceIndex + 1}`);
+                            console.log(`[Photo ${photo._id}] NO MATCH FOUND for face ${faceIndex + 1} (label: ${bestMatchOverall.label}, distance: ${bestMatchOverall.distance.toFixed(4)})`);
                             photo.detectedFaces.push({
                                 faceDescriptorInPhoto: Array.from(detection.descriptor),
                                 matchedUser: undefined,
