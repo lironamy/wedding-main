@@ -29,55 +29,83 @@ export async function GET(request: Request) {
         }
 
         // Find all photos with matched faces
-        const photos = await Photo.find({
-            isProcessed: true,
-            'detectedFaces': {
-                $elemMatch: {
-                    matchedUser: { $exists: true, $ne: null }
+        const matchedPhotos = await Photo.aggregate([
+            {
+                $match: {
+                    'detectedFaces.matchedUser': { $exists: true, $ne: null }
+                }
+            },
+            {
+                $lookup: {
+                    from: 'users',
+                    localField: 'detectedFaces.matchedUser',
+                    foreignField: '_id',
+                    as: 'matchedUsers'
+                }
+            },
+            {
+                $project: {
+                    imageUrl: 1,
+                    detectedFaces: 1,
+                    matchedUsers: 1,
+                    matches: {
+                        $map: {
+                            input: '$detectedFaces',
+                            as: 'face',
+                            in: {
+                                guestName: {
+                                    $let: {
+                                        vars: {
+                                            matchedUser: {
+                                                $arrayElemAt: [
+                                                    {
+                                                        $filter: {
+                                                            input: '$matchedUsers',
+                                                            as: 'user',
+                                                            cond: { $eq: ['$$user._id', '$$face.matchedUser'] }
+                                                        }
+                                                    },
+                                                    0
+                                                ]
+                                            }
+                                        },
+                                        in: '$$matchedUser.name'
+                                    }
+                                },
+                                confidence: '$$face.matchConfidence'
+                            }
+                        }
+                    }
+                }
+            },
+            {
+                $project: {
+                    imageUrl: 1,
+                    guestNames: {
+                        $map: {
+                            input: '$matches',
+                            as: 'match',
+                            in: '$$match.guestName'
+                        }
+                    },
+                    confidences: {
+                        $map: {
+                            input: '$matches',
+                            as: 'match',
+                            in: '$$match.confidence'
+                        }
+                    }
                 }
             }
-        }).populate({
-            path: 'detectedFaces.matchedUser',
-            select: 'name',
-            model: 'User'
+        ]);
+
+        return NextResponse.json({
+            matches: matchedPhotos.map(photo => ({
+                photoUrl: photo.imageUrl,
+                guestNames: photo.guestNames.filter(Boolean),
+                confidences: photo.confidences.filter((c: number | null | undefined) => c !== null && c !== undefined)
+            }))
         });
-
-        console.log('Raw photos data:', JSON.stringify(photos, null, 2));
-
-        // Format the matches
-        const matches = photos.flatMap(photo => {
-            // Get all faces that have a matched user
-            const matchedFaces = photo.detectedFaces.filter((face: IDetectedFace & { matchedUser?: IMatchedUser }) => 
-                face.matchedUser && face.matchConfidence && face.matchConfidence > 0
-            );
-
-            console.log(`Photo ${photo._id} has ${matchedFaces.length} matched faces`);
-
-            return matchedFaces.map((face: IDetectedFace & { matchedUser: IMatchedUser }) => {
-                // Ensure matchConfidence is a number and within valid range
-                const confidence = typeof face.matchConfidence === 'number' && !isNaN(face.matchConfidence) 
-                    ? Math.max(0, Math.min(1, face.matchConfidence)) 
-                    : 0;
-                
-                console.log('Face data:', {
-                    photoUrl: photo.imageUrl,
-                    guestName: face.matchedUser.name,
-                    rawConfidence: face.matchConfidence,
-                    processedConfidence: confidence,
-                    type: typeof face.matchConfidence
-                });
-
-                return {
-                    photoUrl: photo.imageUrl,
-                    guestName: face.matchedUser.name,
-                    confidence
-                };
-            });
-        });
-
-        console.log('Formatted matches:', JSON.stringify(matches, null, 2));
-
-        return NextResponse.json({ matches }, { status: 200 });
     } catch (error: any) {
         console.error('Error fetching matched photos:', error);
         return NextResponse.json({ 

@@ -11,6 +11,13 @@ import { useAuth } from "../context/AuthContext"
 import { Label } from "@/components/ui/label"
 import { Input } from "@/components/ui/input"
 import { Table, TableBody, TableCell, TableHeader, TableRow, TableHead } from "@/components/ui/table"
+import Image from "next/image"
+
+interface MatchedPhoto {
+    photoUrl: string;
+    guestNames: string[];
+    confidences: number[];
+}
 
 export default function DashboardPage() {
   const { user, logout, isLoading } = useAuth()
@@ -41,7 +48,7 @@ export default function DashboardPage() {
   // State for triggering wedding photo processing
   const [processingPhotosMessage, setProcessingPhotosMessage] = useState<string | null>(null)
   const [isProcessingPhotos, setIsProcessingPhotos] = useState(false)
-  const [matchedPhotos, setMatchedPhotos] = useState<Array<{ photoUrl: string; guestName: string; confidence: number }>>([])
+  const [matchedPhotos, setMatchedPhotos] = useState<MatchedPhoto[]>([])
   const [notMatchedPhotos, setNotMatchedPhotos] = useState<Array<{ photoUrl: string; detectedFaces: number; guestName: string; confidence: number }>>([])
   const [allPhotos, setAllPhotos] = useState<Array<{
     photoUrl: string;
@@ -269,68 +276,63 @@ export default function DashboardPage() {
 
   const fetchMatchedPhotos = async () => {
     try {
-      const matchedResponse = await fetch('/api/photos/matched-photos');
-      const matchedData = await matchedResponse.json();
-      console.log('Matched Data:', matchedData);
-      if (matchedResponse.ok && matchedData.matches) {
-        const processedMatches = matchedData.matches.map((match: { photoUrl: string; guestName: string; confidence: number }) => {
-          const confidence = typeof match.confidence === 'number' && !isNaN(match.confidence)
-            ? Math.max(0, Math.min(1, match.confidence))
-            : 0;
-          
-          console.log('Individual match data:', {
+      const response = await fetch('/api/photos/matched-photos', {
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
+      const data = await response.json();
+      console.log('[Dashboard] Matched Data:', data);
+      if (data.matches) {
+        setMatchedPhotos(data.matches);
+        data.matches.forEach((match: MatchedPhoto) => {
+          console.log('[Dashboard] Individual match data:', {
             photoUrl: match.photoUrl,
-            guestName: match.guestName,
-            rawConfidence: match.confidence,
-            processedConfidence: confidence,
-            calculatedPercentage: Math.round(confidence * 100)
+            guestNames: match.guestNames,
+            confidences: match.confidences,
+            calculatedPercentages: match.confidences.map(conf => Math.round(conf * 100))
           });
-
-          return {
-            ...match,
-            confidence
-          };
         });
-
-        setMatchedPhotos(processedMatches);
-      } else {
-        setMatchedPhotos([]);
       }
     } catch (error) {
-      console.error('Error fetching matched photos:', error);
-      setMatchedPhotos([]);
+      console.error('[Dashboard] Error fetching matched photos:', error);
     }
   };
 
   const fetchNotMatchedPhotos = async () => {
     try {
-      const notMatchedResponse = await fetch('/api/photos/not-matched-photos');
-      const notMatchedData = await notMatchedResponse.json();
-      console.log('Not Matched Data:', notMatchedData);
-      if (notMatchedResponse.ok && notMatchedData.photos) {
-        setNotMatchedPhotos(notMatchedData.photos);
-      } else {
-        setNotMatchedPhotos([]);
+      const response = await fetch('/api/photos/not-matched-photos', {
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
+      const data = await response.json();
+      console.log('[Dashboard] Not Matched Data:', data);
+      if (data.photos) {
+        setNotMatchedPhotos(data.photos);
       }
     } catch (error) {
-      console.error('Error fetching not matched photos:', error);
-      setNotMatchedPhotos([]);
+      console.error('[Dashboard] Error fetching not matched photos:', error);
     }
   };
 
   const fetchAllPhotos = async () => {
     try {
-      const response = await fetch('/api/photos/all-photos');
+      const response = await fetch('/api/photos/all-photos', {
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
       const data = await response.json();
-      console.log('All Photos Data:', data);
-      if (response.ok && data.photos) {
+      console.log('[Dashboard] All Photos Data:', data);
+      if (data.photos) {
         setAllPhotos(data.photos);
-      } else {
-        setAllPhotos([]);
       }
     } catch (error) {
-      console.error('Error fetching all photos:', error);
-      setAllPhotos([]);
+      console.error('[Dashboard] Error fetching all photos:', error);
     }
   };
 
@@ -534,63 +536,50 @@ export default function DashboardPage() {
             </Card>
           </TabsContent>
 
-          <TabsContent value="processing" className="space-y-4">
+          <TabsContent value="processing" className="space-y-6">
             <Card>
               <CardHeader>
-                <CardTitle>עיבוד תמונות חתונה</CardTitle>
+                <CardTitle className="flex items-center">
+                  <Camera className="h-5 w-5 ml-2" />תמונות שעובדו
+                </CardTitle>
                 <CardDescription>
-                  עיבוד תמונות החתונה וזיהוי פנים של האורחים
+                  כאן תוכלו לראות את תוצאות עיבוד התמונות וזיהוי הפנים.
                 </CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4">
-                <Button 
-                  onClick={handleProcessWeddingPhotos} 
-                  disabled={isProcessingPhotos}
-                  className="w-full"
-                >
-                  {isProcessingPhotos ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      מעבד תמונות...
-                    </>
-                  ) : (
-                    "התחל עיבוד תמונות חתונה"
-                  )}
-                </Button>
-
-                {processingPhotosMessage && (
-                  <div className="text-center text-sm text-gray-600">
-                    {processingPhotosMessage}
-                  </div>
-                )}
-
-                {matchedPhotos.length > 0 && (
-                  <div className="mt-6">
-                    <h3 className="text-lg font-semibold mb-4">תמונות שזוהו ({matchedPhotos.length} זיהויים):</h3>
-                    <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-2">
-                      {matchedPhotos.map((match, index) => (
-                        <Card key={index} className="overflow-hidden">
-                          <div className="relative aspect-square w-32 h-32 mx-auto">
-                            <img
-                              src={match.photoUrl.split('/upload/').join('/upload/w_300,f_auto,q_auto/')}
-                              alt={`תמונה ${index + 1}`}
-                              className="object-cover w-full h-full"
-                              loading="lazy"
-                            />
+              <CardContent>
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                    {matchedPhotos.map((photo, photoIndex) => (
+                      <div key={photoIndex} className="relative group">
+                        <div className="relative aspect-square overflow-hidden rounded-lg">
+                          <Image
+                            src={photo.photoUrl}
+                            alt={`תמונה ${photoIndex + 1}`}
+                            fill
+                            className="object-cover"
+                          />
+                          <div className="absolute inset-0 bg-gradient-to-t from-black/60 to-transparent opacity-0 group-hover:opacity-100 transition-opacity">
+                            <div className="absolute bottom-0 left-0 right-0 p-4 text-white">
+                              <div className="space-y-1">
+                                {photo.guestNames && photo.confidences && photo.guestNames.length > 0 ? (
+                                  photo.guestNames.map((guest: string, guestIndex: number) => (
+                                    <p key={guestIndex} className="font-medium text-sm text-white">
+                                      {guest} ({Math.round(photo.confidences[guestIndex] * 100)}%)
+                                    </p>
+                                  ))
+                                ) : (
+                                  <p className="font-medium text-sm text-white">
+                                    No match information
+                                  </p>
+                                )}
+                              </div>
+                            </div>
                           </div>
-                          <CardContent className="p-2">
-                            <p className="font-medium text-sm">{match.guestName}</p>
-                            <p className="text-xs text-gray-500">
-                              רמת התאמה: {Math.round((match.confidence || 0) * 100)}%
-                            </p>
-                          </CardContent>
-                        </Card>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                        </div>
+                      </div>
+                    ))}
 
-                {/* Display the not matched photos */}
+                    {/* Display the not matched photos */}
                 <div className="mt-6">
                   <h3 className="text-lg font-semibold mb-4">תמונות שלא זוהו:</h3>
                   {isLoadingPhotos ? (
@@ -648,6 +637,13 @@ export default function DashboardPage() {
                       </div>
                     ))}
                   </div>
+                  </div>
+                  {matchedPhotos.length === 0 && (
+                    <p className="text-center text-gray-500">
+                      לא נמצאו תמונות מזוהות עדיין. נסו להפעיל את תהליך העיבוד.
+                    </p>
+                  )}
+                </div>
                 </div>
               </CardContent>
             </Card>

@@ -65,7 +65,7 @@ export async function POST(request: Request) {
                     guestId,
                     [new Float32Array(faceDescriptor)]
                 );
-                const faceMatcher = new faceapi.FaceMatcher([labeledFaceDescriptor], 0.6); // More forgiving threshold to match process-wedding-photos
+                const faceMatcher = new faceapi.FaceMatcher([labeledFaceDescriptor], 0.55); // More forgiving threshold to match process-wedding-photos
 
                 let processedCount = 0;
                 for (const photoData of allPhotos) { // Iterate over plain photo data
